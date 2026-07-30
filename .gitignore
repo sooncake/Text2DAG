@@ -1,0 +1,22 @@
+# Data
+data/
+*.csv
+*.parquet
+*.npz
+
+# Model outputs
+outputs/
+checkpoints/
+*.pt
+*.pth
+*.ckpt
+
+# Python
+__pycache__/
+*.pyc
+.ipynb_checkpoints/
+
+# Environment and secrets
+.env
+venv/
+.venv/
