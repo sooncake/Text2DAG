@@ -33,7 +33,9 @@ class ColabNotebookTests(unittest.TestCase):
         required_markers = [
             "YOUR_USERNAME/YOUR_REPOSITORY",
             'drive.mount("/content/drive")',
-            "FORCE_RECOMPUTE = False",
+            'MAPPING_PATH = DRIVE_ROOT / "inputs/gfs_sentence_mapping.csv"',
+            'EMBEDDING_OUTPUT_DIR = DRIVE_ROOT / "generated_sentence_embeddings"',
+            "FORCE_RECOMPUTE = True",
             '"--device", "cuda"',
             "patient_embeddings_and_labels.npz",
             "X.shape[1] != 768",
@@ -47,6 +49,18 @@ class ColabNotebookTests(unittest.TestCase):
         for marker in required_markers:
             with self.subTest(marker=marker):
                 self.assertIn(marker, self.all_source)
+
+    def test_preprocessing_uses_sentence_level_contract(self) -> None:
+        forbidden_markers = [
+            "data_row_idx",
+            "original_sentence_idx",
+            "subsentence_idx",
+            "subsentence mapping",
+            "subsentence traceability",
+        ]
+        for marker in forbidden_markers:
+            with self.subTest(marker=marker):
+                self.assertNotIn(marker, self.all_source.lower())
 
 
 if __name__ == "__main__":

@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """Create patient-level mean text embeddings with symptom labels.
 
-Each valid subsentence is embedded independently with ModernBERT. The resulting
-subsentence vectors are then averaged directly by ``data_row_idx`` (the patient
-identifier) and joined to labels from SynSUM.csv.
+Each valid sentence is embedded independently with ModernBERT. The resulting
+sentence vectors are then averaged directly by ``patient_id`` and joined to
+labels from SynSUM.csv.
 """
 
 from __future__ import annotations
@@ -20,10 +20,10 @@ EMBEDDING_DIM: Final = 768
 LABEL_NAMES: Final[list[str]] = ["dysp", "cough", "pain", "fever", "nasal"]
 BINARY_LABELS: Final[list[str]] = ["dysp", "cough", "pain", "nasal"]
 MAPPING_COLUMNS: Final[list[str]] = [
-    "subsentence",
-    "original_sentence_idx",
-    "subsentence_idx",
-    "data_row_idx",
+    "patient_id",
+    "sentence_idx",
+    "global_sentence_idx",
+    "sentence",
 ]
 SOURCE_ID_COLUMN: Final = "Unnamed: 0"
 BINARY_ENCODING: Final[dict[str, int]] = {"no": 0, "yes": 1}
@@ -77,22 +77,22 @@ def load_and_validate_mapping(path: str | Path) -> tuple[pd.DataFrame, int]:
     """
     path = Path(path)
     if not path.is_file():
-        raise FileNotFoundError(f"Subsentence mapping file not found: {path}")
+        raise FileNotFoundError(f"Sentence mapping file not found: {path}")
 
     mapping = pd.read_csv(path)
     _require_columns(mapping, MAPPING_COLUMNS, str(path))
     input_count = len(mapping)
 
-    valid_text = mapping["subsentence"].notna() & mapping["subsentence"].astype(
+    valid_text = mapping["sentence"].notna() & mapping["sentence"].astype(
         str
     ).str.strip().ne("")
     mapping = mapping.loc[valid_text].copy()
     if mapping.empty:
-        raise ValueError(f"{path} contains no valid, non-blank subsentences.")
+        raise ValueError(f"{path} contains no valid, non-blank sentences.")
 
-    mapping["subsentence"] = mapping["subsentence"].astype(str).str.strip()
-    mapping["data_row_idx"] = _coerce_integer_ids(
-        mapping["data_row_idx"], "data_row_idx"
+    mapping["sentence"] = mapping["sentence"].astype(str).str.strip()
+    mapping["patient_id"] = _coerce_integer_ids(
+        mapping["patient_id"], "patient_id"
     )
     return mapping.reset_index(drop=True), input_count
 
@@ -160,24 +160,24 @@ def resolve_device(requested_device: str) -> str:
     return requested_device
 
 
-def embed_subsentences(
+def embed_sentences(
     texts: Sequence[str], model_name: str, batch_size: int, device: str
 ) -> np.ndarray:
-    """Embed prefixed subsentences in batches as a float32 NumPy matrix."""
+    """Embed prefixed sentences in batches as a float32 NumPy matrix."""
     import torch
     from sentence_transformers import SentenceTransformer
 
     if batch_size <= 0:
         raise ValueError(f"batch_size must be positive; received {batch_size}.")
     if len(texts) == 0:
-        raise ValueError("Cannot embed an empty collection of subsentences.")
+        raise ValueError("Cannot embed an empty collection of sentences.")
 
     prefixed_texts = [f"search_document: {text}" for text in texts]
     model = SentenceTransformer(model_name, device=device)
     model.eval()
 
     # Pooling operation 1: SentenceTransformer performs its configured token-level
-    # pooling to produce one full 768-dimensional vector per subsentence.
+    # pooling to produce one full 768-dimensional vector per sentence.
     with torch.inference_mode():
         embeddings = model.encode(
             prefixed_texts,
@@ -198,14 +198,14 @@ def embed_subsentences(
             f"expected {expected_shape}. Ensure no embedding truncation is configured."
         )
     if not np.isfinite(embeddings).all():
-        raise ValueError("Subsentence embeddings contain NaN or infinite values.")
+        raise ValueError("Sentence embeddings contain NaN or infinite values.")
     return embeddings
 
 
 def mean_pool_by_patient(
     mapping: pd.DataFrame, embeddings: np.ndarray
 ) -> tuple[np.ndarray, np.ndarray]:
-    """Mean-pool all subsentence embeddings directly by patient ID."""
+    """Mean-pool all sentence embeddings directly by patient ID."""
     expected_shape = (len(mapping), EMBEDDING_DIM)
     if embeddings.shape != expected_shape:
         raise ValueError(
@@ -215,20 +215,20 @@ def mean_pool_by_patient(
         raise ValueError("Cannot pool embeddings containing NaN or infinite values.")
 
     patient_ids, inverse = np.unique(
-        mapping["data_row_idx"].to_numpy(dtype=np.int64), return_inverse=True
+        mapping["patient_id"].to_numpy(dtype=np.int64), return_inverse=True
     )
     sums = np.zeros((len(patient_ids), EMBEDDING_DIM), dtype=np.float32)
     np.add.at(sums, inverse, embeddings)
     counts = np.bincount(inverse, minlength=len(patient_ids)).astype(np.float32)
     np.divide(sums, counts[:, None], out=sums)
 
-    # Pooling operation 2: directly average every subsentence vector for each
-    # data_row_idx. There is deliberately no original_sentence_idx pooling step.
-    unique_mapping_ids = mapping["data_row_idx"].nunique()
+    # Directly average every sentence vector for each patient. There is no
+    # intermediate sentence-level or document-level pooling operation.
+    unique_mapping_ids = mapping["patient_id"].nunique()
     if len(patient_ids) != unique_mapping_ids or len(sums) != unique_mapping_ids:
         raise RuntimeError(
             "Patient-level mean pooling did not produce exactly one row per unique "
-            "data_row_idx."
+            "patient_id."
         )
     if not np.isfinite(sums).all():
         raise ValueError("Patient-level embeddings contain NaN or infinite values.")
@@ -249,7 +249,7 @@ def join_embeddings_and_labels(
         preview = missing_ids[:20]
         suffix = " ..." if len(missing_ids) > len(preview) else ""
         raise ValueError(
-            f"{len(missing_ids)} data_row_idx value(s) are missing from SynSUM.csv: "
+            f"{len(missing_ids)} patient_id value(s) are missing from SynSUM.csv: "
             f"{preview}{suffix}"
         )
 
@@ -313,10 +313,10 @@ def validate_final_dataset(final: pd.DataFrame) -> None:
 def save_outputs(
     final: pd.DataFrame,
     clean_mapping: pd.DataFrame,
-    subsentence_embeddings: np.ndarray,
+    sentence_embeddings: np.ndarray,
     output_dir: str | Path,
 ) -> None:
-    """Write patient tables, training arrays, and subsentence traceability data."""
+    """Write patient tables, training arrays, and sentence traceability data."""
     output_dir = Path(output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
     embedding_columns = [f"emb_{index:03d}" for index in range(EMBEDDING_DIM)]
@@ -343,26 +343,23 @@ def save_outputs(
         label_names=np.asarray(LABEL_NAMES),
     )
 
-    trace = clean_mapping.copy()
-    trace_embeddings = pd.DataFrame(subsentence_embeddings, columns=embedding_columns)
+    trace = clean_mapping.loc[:, MAPPING_COLUMNS].copy()
+    trace_embeddings = pd.DataFrame(sentence_embeddings, columns=embedding_columns)
     trace = pd.concat([trace.reset_index(drop=True), trace_embeddings], axis=1)
-    trace.to_parquet(output_dir / "subsentence_embeddings.parquet", index=False)
+    trace.to_parquet(output_dir / "sentence_embeddings.parquet", index=False)
 
 
 def print_summary(
-    input_subsentence_count: int,
+    input_sentence_count: int,
     clean_mapping: pd.DataFrame,
     final: pd.DataFrame,
 ) -> None:
     """Print concise data counts and non-zero symptom prevalence."""
     print("Preprocessing summary")
-    print(f"  Input subsentences: {input_subsentence_count:,}")
-    print(f"  Valid subsentences: {len(clean_mapping):,}")
-    print(
-        "  Unique original sentences: "
-        f"{clean_mapping['original_sentence_idx'].nunique():,}"
-    )
-    print(f"  Unique patients: {clean_mapping['data_row_idx'].nunique():,}")
+    print(f"  Input sentences: {input_sentence_count:,}")
+    print(f"  Valid sentences: {len(clean_mapping):,}")
+    print(f"  Unique global sentences: {clean_mapping['global_sentence_idx'].nunique():,}")
+    print(f"  Unique patients: {clean_mapping['patient_id'].nunique():,}")
     print(f"  Embedding dimension: {EMBEDDING_DIM}")
     print(f"  Patients in final joined dataset: {len(final):,}")
     print("  Positive-label prevalence:")
@@ -377,7 +374,7 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description="Create patient-level mean embeddings and symptom labels."
     )
-    parser.add_argument("--mapping-path", default="subsentence_mapping.csv")
+    parser.add_argument("--mapping-path", default="gfs_sentence_mapping.csv")
     parser.add_argument("--source-path", default="SynSUM.csv")
     parser.add_argument("--output-dir", default="outputs/supervised_embeddings")
     parser.add_argument(
@@ -398,35 +395,35 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
 def main(argv: Sequence[str] | None = None) -> None:
     """Run the end-to-end preprocessing pipeline."""
     args = parse_args(argv)
-    mapping, input_count = load_and_validate_mapping(args.mapping_path)
+    mapping, input_sentence_count = load_and_validate_mapping(args.mapping_path)
     labels = encode_labels(load_and_validate_labels(args.source_path))
 
     missing_ids = sorted(
-        set(mapping["data_row_idx"].tolist()) - set(labels["patient_id"].tolist())
+        set(mapping["patient_id"].tolist()) - set(labels["patient_id"].tolist())
     )
     if missing_ids:
         preview = missing_ids[:20]
         suffix = " ..." if len(missing_ids) > len(preview) else ""
         raise ValueError(
-            f"{len(missing_ids)} data_row_idx value(s) are missing from SynSUM.csv: "
+            f"{len(missing_ids)} patient_id value(s) are missing from SynSUM.csv: "
             f"{preview}{suffix}"
         )
 
     device = resolve_device(args.device)
-    print(f"Embedding {len(mapping):,} valid subsentences on device: {device}")
-    subsentence_embeddings = embed_subsentences(
-        mapping["subsentence"].tolist(),
+    print(f"Embedding {len(mapping):,} valid sentences on device: {device}")
+    sentence_embeddings = embed_sentences(
+        mapping["sentence"].tolist(),
         model_name=args.model_name,
         batch_size=args.batch_size,
         device=device,
     )
     patient_ids, patient_embeddings = mean_pool_by_patient(
-        mapping, subsentence_embeddings
+        mapping, sentence_embeddings
     )
     final = join_embeddings_and_labels(patient_ids, patient_embeddings, labels)
     validate_final_dataset(final)
-    save_outputs(final, mapping, subsentence_embeddings, args.output_dir)
-    print_summary(input_count, mapping, final)
+    save_outputs(final, mapping, sentence_embeddings, args.output_dir)
+    print_summary(input_sentence_count, mapping, final)
     print(f"Outputs written to: {Path(args.output_dir).resolve()}")
 
 

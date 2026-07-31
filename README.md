@@ -14,12 +14,12 @@ python -m pip install -r requirements.txt
 
 ## Run
 
-From the project directory, with `subsentence_mapping.csv` and `SynSUM.csv` in
+From the project directory, with `gfs_sentence_mapping.csv` and `SynSUM.csv` in
 that directory:
 
 ```bash
 python prepare_patient_embeddings.py \
-  --mapping-path subsentence_mapping.csv \
+  --mapping-path gfs_sentence_mapping.csv \
   --source-path SynSUM.csv \
   --output-dir outputs/supervised_embeddings \
   --batch-size 32 \
@@ -34,7 +34,7 @@ The output directory contains:
 - `patient_mean_embeddings_with_labels.parquet`
 - `patient_mean_embeddings_with_labels.csv`
 - `patient_embeddings_and_labels.npz`
-- `subsentence_embeddings.parquet`
+- `sentence_embeddings.parquet`
 
 Run the lightweight tests, which do not download the model, with:
 
@@ -50,5 +50,5 @@ requested mapping: `none=0`, `low=1`, and `high=2`.
 Open `colab_embedding_and_training.ipynb` in Google Colab for GPU embedding
 generation and reproducible supervised training. Before running it, select a GPU
 runtime and edit the clearly marked repository URL and Google Drive path cells.
-The notebook skips embedding generation when its NPZ output already exists,
-unless `FORCE_RECOMPUTE` is enabled.
+The notebook uses a dedicated `generated_sentence_embeddings` directory and is
+configured with `FORCE_RECOMPUTE=True` for the first sentence-level run.
