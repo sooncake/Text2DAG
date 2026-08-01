@@ -35,7 +35,7 @@ class ColabNotebookTests(unittest.TestCase):
             'drive.mount("/content/drive")',
             'MAPPING_PATH = DRIVE_ROOT / "inputs/gfs_sentence_mapping.csv"',
             'EMBEDDING_OUTPUT_DIR = DRIVE_ROOT / "generated_sentence_embeddings"',
-            "FORCE_RECOMPUTE = True",
+            "FORCE_RECOMPUTE = False",
             '"--device", "cuda"',
             "patient_embeddings_and_labels.npz",
             "X.shape[1] != 768",
@@ -50,11 +50,18 @@ class ColabNotebookTests(unittest.TestCase):
             "0.05, 0.10, 0.20",
             "0.80, 0.90, 1.00",
             '"cv_folds": 5',
+            '"experiment_seeds": [42, 43, 44, 45, 46]',
+            '"hidden_dim": 128',
+            "nn.Linear(input_dim, hidden_dim)",
+            "nn.Linear(hidden_dim, len(label_names))",
             "MultilabelStratifiedKFold",
             "MultilabelStratifiedShuffleSplit",
             'y[:, 3] = (y_original[:, 3] > 0).astype(np.int64)',
             "learning_curve_summary.csv",
             "learning_curve_per_label.csv",
+            "all_dataset_per_label_metrics.csv",
+            "test_per_label_metrics.csv",
+            "all_dataset_predictions_trainpool_",
             "learning_curve.png",
         ]
         for marker in required_markers:
@@ -68,6 +75,7 @@ class ColabNotebookTests(unittest.TestCase):
             "fever_head",
             "fever_probabilities",
             "CrossEntropyLoss",
+            "hidden_dim // 2",
         ]
         for marker in forbidden_markers:
             with self.subTest(marker=marker):

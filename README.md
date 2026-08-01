@@ -50,5 +50,6 @@ requested mapping: `none=0`, `low=1`, and `high=2`.
 Open `colab_embedding_and_training.ipynb` in Google Colab for GPU embedding
 generation and reproducible supervised training. Before running it, select a GPU
 runtime and edit the clearly marked repository URL and Google Drive path cells.
-The notebook uses a dedicated `generated_sentence_embeddings` directory and is
-configured with `FORCE_RECOMPUTE=True` for the first sentence-level run.
+The notebook saves embeddings in a dedicated `generated_sentence_embeddings`
+directory and reuses them on later runs. Set `FORCE_RECOMPUTE=True` only after
+changing the source text, mapping, or embedding model.
