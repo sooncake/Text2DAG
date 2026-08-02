@@ -778,6 +778,8 @@ def _evaluate_and_save(
         "predictions_csv": str(csv_path),
         "predictions_npz": str(npz_path),
         "per_symptom_metrics_csv": str(metrics_path),
+        "per_symptom_metrics": rows,
+        "macro_f1": float(np.mean([row["f1"] for row in rows])),
     }
 
 
@@ -1000,6 +1002,379 @@ def run_legacy_reproduction(
     return metadata
 
 
+def _learning_curve_cache_paths(prefix: Path) -> dict[str, Path]:
+    """Return the four files written by ``_cache_scope`` for one prefix."""
+    return {
+        "X": prefix.with_name(prefix.name + "_patient_embeddings.npy"),
+        "y": prefix.with_name(prefix.name + "_patient_embeddings_labels.npy"),
+        "patient_ids": prefix.with_name(prefix.name + "_patient_ids.npy"),
+        "source_patient_ids": prefix.with_name(
+            prefix.name + "_source_patient_ids.npy"
+        ),
+    }
+
+
+def _load_learning_curve_cache(prefix: Path) -> dict[str, np.ndarray]:
+    paths = _learning_curve_cache_paths(prefix)
+    return {
+        "X": np.load(paths["X"], allow_pickle=False),
+        "y": np.load(paths["y"], allow_pickle=False),
+        "patient_ids": np.load(paths["patient_ids"], allow_pickle=False),
+        "source_patient_ids": np.load(
+            paths["source_patient_ids"], allow_pickle=True
+        ),
+    }
+
+
+def _validate_learning_curve_fractions(
+    training_fractions: Sequence[float],
+) -> list[float]:
+    fractions = [float(value) for value in training_fractions]
+    if not fractions:
+        raise ValueError("At least one legacy training fraction is required.")
+    if len(set(fractions)) != len(fractions):
+        raise ValueError(f"Legacy training fractions contain duplicates: {fractions}")
+    if any(value <= 0 or value > 1 for value in fractions):
+        raise ValueError(
+            f"Legacy training fractions must be in (0, 1], found {fractions}"
+        )
+    return fractions
+
+
+def generate_or_load_learning_curve_embeddings(
+    source: dict[str, Any],
+    output_dir: Path,
+    model_name: str,
+    device: torch.device,
+    training_fractions: Sequence[float],
+    force_recompute: bool,
+) -> tuple[
+    dict[float, dict[str, np.ndarray]],
+    dict[str, np.ndarray],
+    dict[str, np.ndarray],
+    dict[str, Any],
+]:
+    """Create separate legacy-compatible caches for every nested train fraction.
+
+    Each fraction is embedded through its own shuffled DataLoader. This retains
+    the legacy batch-local sentence padding behavior instead of slicing a single
+    corrected or globally pooled cache.
+    """
+    from sklearn.model_selection import train_test_split
+    from transformers import AutoTokenizer
+
+    fractions = _validate_learning_curve_fractions(training_fractions)
+    seed = int(LEGACY_CONFIG["seed"])
+    curve_dir = output_dir / "learning_curve_seed5"
+    curve_dir.mkdir(parents=True, exist_ok=True)
+    metadata_path = curve_dir / "legacy_learning_curve_embedding_metadata.json"
+    split_path = curve_dir / "legacy_learning_curve_split_patient_ids.npz"
+    test_prefix = curve_dir / "legacy_fixed_test"
+    fraction_prefixes = {
+        fraction: curve_dir / f"legacy_trainpool_{int(round(fraction * 100)):03d}pct"
+        for fraction in fractions
+    }
+    expected_paths = [
+        path
+        for prefix in [test_prefix, *fraction_prefixes.values()]
+        for path in _learning_curve_cache_paths(prefix).values()
+    ]
+    reusable = (
+        metadata_path.is_file()
+        and split_path.is_file()
+        and all(path.is_file() for path in expected_paths)
+        and not force_recompute
+    )
+    if reusable:
+        metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+        expected_fraction_list = [float(value) for value in metadata["training_fractions"]]
+        invalid_reasons = []
+        if metadata.get("source_sha256") != source["source_sha256"]:
+            invalid_reasons.append("source file changed")
+        if metadata.get("model_name") != model_name:
+            invalid_reasons.append("model name changed")
+        if metadata.get("reproduction_code_sha256") != _sha256(Path(__file__)):
+            invalid_reasons.append("reproduction code changed")
+        if expected_fraction_list != fractions:
+            invalid_reasons.append("training fractions changed")
+        if invalid_reasons:
+            raise ValueError(
+                "Cannot reuse legacy learning-curve embeddings because "
+                + ", ".join(invalid_reasons)
+                + ". Set FORCE_RECOMPUTE=True."
+            )
+        with np.load(split_path, allow_pickle=True) as saved_split:
+            split_payload = {name: saved_split[name] for name in saved_split.files}
+        fraction_arrays = {
+            fraction: _load_learning_curve_cache(prefix)
+            for fraction, prefix in fraction_prefixes.items()
+        }
+        test_arrays = _load_learning_curve_cache(test_prefix)
+        print(f"Reusing legacy learning-curve embeddings from {curve_dir}")
+        return fraction_arrays, test_arrays, split_payload, metadata
+
+    seed_everything(seed)
+    tokenizer = AutoTokenizer.from_pretrained(model_name)
+    encoder_model = LegacyEncoderModel(model_name)
+    all_positions = np.arange(len(source["patient_ids"]), dtype=np.int64)
+    train_positions, test_positions = train_test_split(
+        all_positions,
+        test_size=LEGACY_CONFIG["outer_test_fraction"],
+        random_state=seed,
+    )
+    local_order = list(range(len(train_positions)))
+    random.seed(seed)
+    random.shuffle(local_order)
+    nested_train_positions = train_positions[np.asarray(local_order, dtype=np.int64)]
+
+    def make_dataset(positions: np.ndarray) -> LegacyMultiLabelDataset:
+        return LegacyMultiLabelDataset(
+            [source["texts"][int(index)] for index in positions],
+            source["labels"][positions],
+            source["patient_ids"][positions],
+            source["source_patient_ids"][positions],
+            tokenizer,
+            max_length=int(LEGACY_CONFIG["max_token_length"]),
+        )
+
+    # Fixed test embeddings are shared by all supervised models.
+    seed_everything(seed)
+    test_loader = DataLoader(
+        make_dataset(test_positions),
+        batch_size=int(LEGACY_CONFIG["embedding_batch_size"]),
+        shuffle=False,
+        collate_fn=legacy_collate_fn,
+    )
+    test_arrays = _cache_scope(encoder_model, test_loader, device, test_prefix)
+
+    fraction_arrays: dict[float, dict[str, np.ndarray]] = {}
+    split_payload: dict[str, np.ndarray] = {
+        "outer_train_patient_ids": source["patient_ids"][train_positions],
+        "outer_test_patient_ids": source["patient_ids"][test_positions],
+        "nested_training_order_patient_ids": source["patient_ids"][
+            nested_train_positions
+        ],
+        "outer_train_source_patient_ids": source["source_patient_ids"][
+            train_positions
+        ],
+        "outer_test_source_patient_ids": source["source_patient_ids"][test_positions],
+    }
+    for fraction in fractions:
+        percent = int(round(fraction * 100))
+        subset_size = max(2, min(len(train_positions), int(len(train_positions) * fraction)))
+        subset_positions = nested_train_positions[:subset_size]
+        split_payload[f"trainpool_{percent:03d}pct_patient_ids"] = source[
+            "patient_ids"
+        ][subset_positions]
+        split_payload[f"trainpool_{percent:03d}pct_source_patient_ids"] = source[
+            "source_patient_ids"
+        ][subset_positions]
+
+        # One experiment seed (5) is reset for every fraction. The subset membership
+        # remains nested, while each fraction gets its own legacy shuffled cache.
+        seed_everything(seed)
+        loader = DataLoader(
+            make_dataset(subset_positions),
+            batch_size=int(LEGACY_CONFIG["embedding_batch_size"]),
+            shuffle=True,
+            collate_fn=legacy_collate_fn,
+        )
+        fraction_arrays[fraction] = _cache_scope(
+            encoder_model, loader, device, fraction_prefixes[fraction]
+        )
+
+    np.savez_compressed(split_path, **split_payload)
+    metadata = {
+        "cache_schema_version": 1,
+        "created_at_utc": datetime.now(timezone.utc).isoformat(),
+        "workflow": "legacy learning curve",
+        "seed": seed,
+        "training_fractions": fractions,
+        "source_sha256": source["source_sha256"],
+        "reproduction_code_sha256": _sha256(Path(__file__)),
+        "model_name": model_name,
+        "resolved_model_revision": getattr(
+            encoder_model.encoder.config, "_commit_hash", None
+        ),
+        "resolved_tokenizer_revision": tokenizer.init_kwargs.get("_commit_hash"),
+        "outer_train_patients": len(train_positions),
+        "fixed_test_patients": len(test_positions),
+        "selection": "one seed-5 shuffled nested order; each fraction is a prefix",
+        "embedding_behavior": (
+            "each fraction uses its own shuffled legacy DataLoader, zero sentence-slot "
+            "padding, pooler/CLS sentence embeddings, and unmasked sentence mean"
+        ),
+        "split_patient_ids": str(split_path),
+        "package_versions": _package_versions(),
+    }
+    metadata_path.write_text(json.dumps(_json_safe(metadata), indent=2), encoding="utf-8")
+    print(f"Generated legacy learning-curve embeddings in {curve_dir}")
+    return fraction_arrays, test_arrays, split_payload, metadata
+
+
+def run_legacy_learning_curve(
+    source_path: str | Path,
+    embedding_dir: str | Path,
+    checkpoint_dir: str | Path,
+    results_dir: str | Path,
+    training_fractions: Sequence[float] = (0.05, 0.10, 0.20, 0.30, 0.50, 1.00),
+    model_name: str = "nomic-ai/modernbert-embed-base",
+    device_name: str = "cuda",
+    force_recompute: bool = False,
+) -> dict[str, Any]:
+    """Train every requested legacy supervised model and summarize test F1."""
+    fractions = _validate_learning_curve_fractions(training_fractions)
+    seed = int(LEGACY_CONFIG["seed"])
+    seed_everything(seed)
+    if device_name.startswith("cuda") and not torch.cuda.is_available():
+        raise RuntimeError(f"Requested {device_name}, but CUDA is unavailable.")
+    device = torch.device(device_name)
+    embedding_dir, checkpoint_dir, results_dir = map(
+        Path, (embedding_dir, checkpoint_dir, results_dir)
+    )
+    curve_checkpoint_dir = checkpoint_dir / "learning_curve_seed5"
+    curve_results_dir = results_dir / "learning_curve_seed5"
+    per_model_results_dir = curve_results_dir / "per_model"
+    for directory in (embedding_dir, curve_checkpoint_dir, per_model_results_dir):
+        directory.mkdir(parents=True, exist_ok=True)
+
+    source = load_legacy_source(source_path)
+    fraction_arrays, test_arrays, split_payload, embedding_metadata = (
+        generate_or_load_learning_curve_embeddings(
+            source=source,
+            output_dir=embedding_dir,
+            model_name=model_name,
+            device=device,
+            training_fractions=fractions,
+            force_recompute=force_recompute,
+        )
+    )
+
+    variablewise_rows: list[dict[str, Any]] = []
+    macro_rows: list[dict[str, Any]] = []
+    model_runs: list[dict[str, Any]] = []
+    for fraction in fractions:
+        percent = int(round(fraction * 100))
+        print(
+            f"\nTraining legacy supervised model: {percent}% of train pool "
+            f"({len(fraction_arrays[fraction]['X'])} patients), seed={seed}"
+        )
+        # Every supervised model uses the same single experiment seed.
+        seed_everything(seed)
+        model_checkpoint_dir = curve_checkpoint_dir / f"trainpool_{percent:03d}pct"
+        model_results_dir = per_model_results_dir / f"trainpool_{percent:03d}pct"
+        model_results_dir.mkdir(parents=True, exist_ok=True)
+        model, training_metadata, validation_ids = _train_legacy_head(
+            fraction_arrays[fraction], device, model_checkpoint_dir
+        )
+        evaluation = _evaluate_and_save(
+            model,
+            test_arrays,
+            device,
+            model_results_dir,
+            "test",
+        )
+        np.savez_compressed(
+            model_results_dir / "legacy_model_split_patient_ids.npz",
+            selected_trainpool_patient_ids=split_payload[
+                f"trainpool_{percent:03d}pct_patient_ids"
+            ],
+            fixed_test_patient_ids=split_payload["outer_test_patient_ids"],
+            **validation_ids,
+        )
+
+        per_label_f1 = {
+            row["label"]: float(row["f1"])
+            for row in evaluation["per_symptom_metrics"]
+        }
+        common = {
+            "seed": seed,
+            "trainset_fraction": fraction,
+            "trainset_percent": percent,
+            "full_dataset_fraction": fraction
+            * (1.0 - float(LEGACY_CONFIG["outer_test_fraction"])),
+            "subset_patients": len(fraction_arrays[fraction]["X"]),
+            "fixed_test_patients": len(test_arrays["X"]),
+        }
+        variablewise_rows.append(
+            {
+                **common,
+                **{f"{label}_f1": per_label_f1[label] for label in LABEL_NAMES},
+            }
+        )
+        macro_rows.append({**common, "macro_f1": evaluation["macro_f1"]})
+        model_runs.append(
+            {
+                **common,
+                "training": training_metadata,
+                "test_evaluation": evaluation,
+                "checkpoint_directory": str(model_checkpoint_dir),
+                "results_directory": str(model_results_dir),
+            }
+        )
+
+    variablewise_frame = pd.DataFrame(variablewise_rows).sort_values(
+        "trainset_fraction"
+    )
+    macro_frame = pd.DataFrame(macro_rows).sort_values("trainset_fraction")
+    variablewise_path = curve_results_dir / "legacy_variablewise_f1.csv"
+    macro_path = curve_results_dir / "legacy_macro_f1.csv"
+    variablewise_frame.to_csv(variablewise_path, index=False)
+    macro_frame.to_csv(macro_path, index=False)
+
+    metadata = {
+        "status": "completed",
+        "workflow": "legacy learning curve",
+        "seed": seed,
+        "training_fractions": fractions,
+        "fraction_definition": "fraction of the fixed 80% outer training pool",
+        "fixed_test_fraction": LEGACY_CONFIG["outer_test_fraction"],
+        "label_names": LABEL_NAMES,
+        "fever_training_values": sorted(np.unique(source["labels"][:, 3]).tolist()),
+        "f1_target_note": (
+            "F1 treats every raw target > 0 as positive for evaluation only; raw fever "
+            "values, including 2, remain unchanged during BCE training."
+        ),
+        "variablewise_f1": str(variablewise_path),
+        "macro_f1": str(macro_path),
+        "embedding_metadata": embedding_metadata,
+        "model_runs": model_runs,
+        "runtime": {
+            "python": platform.python_version(),
+            "device": str(device),
+            "gpu": torch.cuda.get_device_name(0) if torch.cuda.is_available() else None,
+            "cuda": torch.version.cuda,
+            "cudnn": torch.backends.cudnn.version(),
+            "packages": _package_versions(),
+        },
+    }
+    metadata_path = curve_results_dir / "legacy_learning_curve_metadata.json"
+    metadata_path.write_text(
+        json.dumps(_json_safe(metadata), indent=2), encoding="utf-8"
+    )
+    report_path = curve_results_dir / "legacy_learning_curve_report.md"
+    fraction_text = ", ".join(
+        f"{int(round(fraction * 100))}%" for fraction in fractions
+    )
+    report_path.write_text(
+        "# Legacy supervised learning curve\n\n"
+        f"{len(fractions)} independent supervised models were trained with seed 5 "
+        f"using {fraction_text} of the fixed outer training pool. All models were "
+        "evaluated on the same held-out 20% test set.\n\n"
+        f"- Variable-wise F1: `{variablewise_path.name}`\n"
+        f"- Macro-F1: `{macro_path.name}`\n"
+        f"- Metadata: `{metadata_path.name}`\n",
+        encoding="utf-8",
+    )
+    print("\nVariable-wise F1")
+    print(variablewise_frame.to_string(index=False))
+    print("\nMacro-F1")
+    print(macro_frame.to_string(index=False))
+    print(f"\nVariable-wise F1: {variablewise_path}")
+    print(f"Macro-F1: {macro_path}")
+    return metadata
+
+
 def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--source-path", required=True)
@@ -1009,20 +1384,37 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--model-name", default="nomic-ai/modernbert-embed-base")
     parser.add_argument("--device", default="cuda")
     parser.add_argument("--force-recompute", action="store_true")
+    parser.add_argument(
+        "--learning-curve",
+        action="store_true",
+        help="Train one legacy model for every --training-fractions value.",
+    )
+    parser.add_argument(
+        "--training-fractions",
+        nargs="+",
+        type=float,
+        default=[0.05, 0.10, 0.20, 0.30, 0.50, 1.00],
+    )
     return parser.parse_args(argv)
 
 
 def main(argv: Sequence[str] | None = None) -> None:
     args = parse_args(argv)
-    run_legacy_reproduction(
-        source_path=args.source_path,
-        embedding_dir=args.embedding_dir,
-        checkpoint_dir=args.checkpoint_dir,
-        results_dir=args.results_dir,
-        model_name=args.model_name,
-        device_name=args.device,
-        force_recompute=args.force_recompute,
-    )
+    common = {
+        "source_path": args.source_path,
+        "embedding_dir": args.embedding_dir,
+        "checkpoint_dir": args.checkpoint_dir,
+        "results_dir": args.results_dir,
+        "model_name": args.model_name,
+        "device_name": args.device,
+        "force_recompute": args.force_recompute,
+    }
+    if args.learning_curve:
+        run_legacy_learning_curve(
+            **common, training_fractions=args.training_fractions
+        )
+    else:
+        run_legacy_reproduction(**common)
 
 
 if __name__ == "__main__":

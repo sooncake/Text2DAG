@@ -32,9 +32,15 @@ class ColabNotebookTests(unittest.TestCase):
     def test_required_colab_workflow_is_present(self) -> None:
         required_markers = [
             "LEGACY_REPRODUCTION_MODE = True",
+            "LEGACY_LEARNING_CURVE_MODE = True",
+            "LEGACY_TRAINING_FRACTIONS = [0.05, 0.10, 0.20, 0.30, 0.50, 1.00]",
             'LEGACY_ROOT = DRIVE_ROOT / "legacy_reproduction"',
             'legacy_script = PROJECT_DIR / "legacy_reproduction.py"',
             '"legacy_reproduction_metadata.json"',
+            '"--learning-curve"',
+            '"--training-fractions"',
+            "legacy_variablewise_f1.csv",
+            "legacy_macro_f1.csv",
             'CURRENT_FRAMEWORK_HEAD = "modern_mlp"',
             '"legacy_two_layer_linear"',
             "YOUR_USERNAME/YOUR_REPOSITORY",

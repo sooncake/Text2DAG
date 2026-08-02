@@ -66,8 +66,15 @@ are therefore the only result reference currently available.
 
 ## Implementation and artifacts
 
-`LEGACY_REPRODUCTION_MODE=True` is the notebook default. Workflow A calls
-`legacy_reproduction.py` and writes only beneath `legacy_reproduction/`:
+`LEGACY_REPRODUCTION_MODE=True` is the notebook default. The additional default
+`LEGACY_LEARNING_CURVE_MODE=True` uses seed 5 to train independent models on 5%,
+10%, 20%, 30%, 50%, and 100% of the fixed outer training pool. All models use the
+same held-out 20% test set. The principal learning-curve outputs are
+`legacy_variablewise_f1.csv` and `legacy_macro_f1.csv`.
+
+Set `LEGACY_LEARNING_CURVE_MODE=False` for the original single 20%-train-pool
+Workflow A reproduction. Both paths call `legacy_reproduction.py` and write only
+beneath `legacy_reproduction/`:
 
 - `embeddings/legacy_patient_embeddings.npy` and matching labels/IDs;
 - separate train-subset and test caches with labels and patient IDs;
