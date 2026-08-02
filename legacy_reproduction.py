@@ -1069,14 +1069,14 @@ def generate_or_load_learning_curve_embeddings(
     curve_dir.mkdir(parents=True, exist_ok=True)
     metadata_path = curve_dir / "legacy_learning_curve_embedding_metadata.json"
     split_path = curve_dir / "legacy_learning_curve_split_patient_ids.npz"
-    test_prefix = curve_dir / "legacy_fixed_test"
+    full_dataset_prefix = curve_dir / "legacy_fixed_full_dataset"
     fraction_prefixes = {
         fraction: curve_dir / f"legacy_trainpool_{int(round(fraction * 100)):03d}pct"
         for fraction in fractions
     }
     expected_paths = [
         path
-        for prefix in [test_prefix, *fraction_prefixes.values()]
+        for prefix in [full_dataset_prefix, *fraction_prefixes.values()]
         for path in _learning_curve_cache_paths(prefix).values()
     ]
     reusable = (
@@ -1109,9 +1109,9 @@ def generate_or_load_learning_curve_embeddings(
             fraction: _load_learning_curve_cache(prefix)
             for fraction, prefix in fraction_prefixes.items()
         }
-        test_arrays = _load_learning_curve_cache(test_prefix)
+        full_dataset_arrays = _load_learning_curve_cache(full_dataset_prefix)
         print(f"Reusing legacy learning-curve embeddings from {curve_dir}")
-        return fraction_arrays, test_arrays, split_payload, metadata
+        return fraction_arrays, full_dataset_arrays, split_payload, metadata
 
     seed_everything(seed)
     tokenizer = AutoTokenizer.from_pretrained(model_name)
@@ -1137,15 +1137,22 @@ def generate_or_load_learning_curve_embeddings(
             max_length=int(LEGACY_CONFIG["max_token_length"]),
         )
 
-    # Fixed test embeddings are shared by all supervised models.
+    # One fixed full-dataset legacy cache is shared by all supervised models.
+    # It follows the original all_embs.npy path: original patient order, batch-local
+    # sentence padding, pooler/CLS sentence vectors, and unmasked sentence averaging.
     seed_everything(seed)
-    test_loader = DataLoader(
-        make_dataset(test_positions),
+    full_dataset_loader = DataLoader(
+        make_dataset(all_positions),
         batch_size=int(LEGACY_CONFIG["embedding_batch_size"]),
         shuffle=False,
         collate_fn=legacy_collate_fn,
     )
-    test_arrays = _cache_scope(encoder_model, test_loader, device, test_prefix)
+    full_dataset_arrays = _cache_scope(
+        encoder_model,
+        full_dataset_loader,
+        device,
+        full_dataset_prefix,
+    )
 
     fraction_arrays: dict[float, dict[str, np.ndarray]] = {}
     split_payload: dict[str, np.ndarray] = {
@@ -1199,6 +1206,7 @@ def generate_or_load_learning_curve_embeddings(
         "resolved_tokenizer_revision": tokenizer.init_kwargs.get("_commit_hash"),
         "outer_train_patients": len(train_positions),
         "fixed_test_patients": len(test_positions),
+        "full_dataset_evaluation_patients": len(all_positions),
         "selection": "one seed-5 shuffled nested order; each fraction is a prefix",
         "embedding_behavior": (
             "each fraction uses its own shuffled legacy DataLoader, zero sentence-slot "
@@ -1209,7 +1217,7 @@ def generate_or_load_learning_curve_embeddings(
     }
     metadata_path.write_text(json.dumps(_json_safe(metadata), indent=2), encoding="utf-8")
     print(f"Generated legacy learning-curve embeddings in {curve_dir}")
-    return fraction_arrays, test_arrays, split_payload, metadata
+    return fraction_arrays, full_dataset_arrays, split_payload, metadata
 
 
 def run_legacy_learning_curve(
@@ -1222,7 +1230,7 @@ def run_legacy_learning_curve(
     device_name: str = "cuda",
     force_recompute: bool = False,
 ) -> dict[str, Any]:
-    """Train every requested legacy supervised model and summarize test F1."""
+    """Train every requested legacy model and summarize full-dataset F1."""
     fractions = _validate_learning_curve_fractions(training_fractions)
     seed = int(LEGACY_CONFIG["seed"])
     seed_everything(seed)
@@ -1239,7 +1247,7 @@ def run_legacy_learning_curve(
         directory.mkdir(parents=True, exist_ok=True)
 
     source = load_legacy_source(source_path)
-    fraction_arrays, test_arrays, split_payload, embedding_metadata = (
+    fraction_arrays, full_dataset_arrays, split_payload, embedding_metadata = (
         generate_or_load_learning_curve_embeddings(
             source=source,
             output_dir=embedding_dir,
@@ -1269,10 +1277,10 @@ def run_legacy_learning_curve(
         )
         evaluation = _evaluate_and_save(
             model,
-            test_arrays,
+            full_dataset_arrays,
             device,
             model_results_dir,
-            "test",
+            "all",
         )
         np.savez_compressed(
             model_results_dir / "legacy_model_split_patient_ids.npz",
@@ -1280,6 +1288,7 @@ def run_legacy_learning_curve(
                 f"trainpool_{percent:03d}pct_patient_ids"
             ],
             fixed_test_patient_ids=split_payload["outer_test_patient_ids"],
+            full_dataset_evaluation_patient_ids=full_dataset_arrays["patient_ids"],
             **validation_ids,
         )
 
@@ -1294,7 +1303,8 @@ def run_legacy_learning_curve(
             "full_dataset_fraction": fraction
             * (1.0 - float(LEGACY_CONFIG["outer_test_fraction"])),
             "subset_patients": len(fraction_arrays[fraction]["X"]),
-            "fixed_test_patients": len(test_arrays["X"]),
+            "evaluation_scope": "full_dataset",
+            "evaluation_patients": len(full_dataset_arrays["X"]),
         }
         variablewise_rows.append(
             {
@@ -1307,7 +1317,7 @@ def run_legacy_learning_curve(
             {
                 **common,
                 "training": training_metadata,
-                "test_evaluation": evaluation,
+                "full_dataset_evaluation": evaluation,
                 "checkpoint_directory": str(model_checkpoint_dir),
                 "results_directory": str(model_results_dir),
             }
@@ -1329,6 +1339,12 @@ def run_legacy_learning_curve(
         "training_fractions": fractions,
         "fraction_definition": "fraction of the fixed 80% outer training pool",
         "fixed_test_fraction": LEGACY_CONFIG["outer_test_fraction"],
+        "evaluation_scope": "full_dataset",
+        "evaluation_patients": len(full_dataset_arrays["X"]),
+        "evaluation_warning": (
+            "Full-dataset F1 includes patients used for training and validation. It is "
+            "descriptive and must not be interpreted as held-out generalization F1."
+        ),
         "label_names": LABEL_NAMES,
         "fever_training_values": sorted(np.unique(source["labels"][:, 3]).tolist()),
         "f1_target_note": (
@@ -1360,7 +1376,8 @@ def run_legacy_learning_curve(
         "# Legacy supervised learning curve\n\n"
         f"{len(fractions)} independent supervised models were trained with seed 5 "
         f"using {fraction_text} of the fixed outer training pool. All models were "
-        "evaluated on the same held-out 20% test set.\n\n"
+        "evaluated on the same complete 100% dataset (10,000 patients). This scope "
+        "includes training patients and is descriptive rather than held-out.\n\n"
         f"- Variable-wise F1: `{variablewise_path.name}`\n"
         f"- Macro-F1: `{macro_path.name}`\n"
         f"- Metadata: `{metadata_path.name}`\n",

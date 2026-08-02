@@ -68,8 +68,9 @@ are therefore the only result reference currently available.
 
 `LEGACY_REPRODUCTION_MODE=True` is the notebook default. The additional default
 `LEGACY_LEARNING_CURVE_MODE=True` uses seed 5 to train independent models on 5%,
-10%, 20%, 30%, 50%, and 100% of the fixed outer training pool. All models use the
-same held-out 20% test set. The principal learning-curve outputs are
+10%, 20%, 30%, 50%, and 100% of the fixed outer training pool. All models are
+evaluated on the same complete 100% dataset. These metrics include training rows
+and are descriptive rather than held-out. The principal learning-curve outputs are
 `legacy_variablewise_f1.csv` and `legacy_macro_f1.csv`.
 
 Set `LEGACY_LEARNING_CURVE_MODE=False` for the original single 20%-train-pool

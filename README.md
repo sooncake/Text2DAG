@@ -53,8 +53,9 @@ runtime and edit the clearly marked repository URL and Google Drive path cells.
 The notebook defaults to `LEGACY_REPRODUCTION_MODE=True` and
 `LEGACY_LEARNING_CURVE_MODE=True`. It trains six legacy supervised models with
 seed 5 using 5%, 10%, 20%, 30%, 50%, and 100% of the fixed 80% outer training
-pool. Every model is evaluated on the same held-out 20% test set. The principal
-outputs are `legacy_variablewise_f1.csv` and `legacy_macro_f1.csv`; fraction-level
+pool. Every model is evaluated on the complete 100% dataset. These metrics include
+training patients and are descriptive rather than held-out. The principal outputs
+are `legacy_variablewise_f1.csv` and `legacy_macro_f1.csv`; fraction-level
 checkpoints, histories, split IDs, detailed metrics, and predictions are also
 saved. Everything is written under `legacy_reproduction/`, without reusing or
 overwriting modern embeddings.
