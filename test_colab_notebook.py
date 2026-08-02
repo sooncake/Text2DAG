@@ -31,6 +31,12 @@ class ColabNotebookTests(unittest.TestCase):
 
     def test_required_colab_workflow_is_present(self) -> None:
         required_markers = [
+            "LEGACY_REPRODUCTION_MODE = True",
+            'LEGACY_ROOT = DRIVE_ROOT / "legacy_reproduction"',
+            'legacy_script = PROJECT_DIR / "legacy_reproduction.py"',
+            '"legacy_reproduction_metadata.json"',
+            'CURRENT_FRAMEWORK_HEAD = "modern_mlp"',
+            '"legacy_two_layer_linear"',
             "YOUR_USERNAME/YOUR_REPOSITORY",
             'drive.mount("/content/drive")',
             'MAPPING_PATH = DRIVE_ROOT / "inputs/gfs_sentence_mapping.csv"',
@@ -65,6 +71,18 @@ class ColabNotebookTests(unittest.TestCase):
             "learning_curve.png",
         ]
         for marker in required_markers:
+            with self.subTest(marker=marker):
+                self.assertIn(marker, self.all_source)
+
+    def test_legacy_mode_skips_modern_execution_cells(self) -> None:
+        skip_markers = [
+            "Modern array loading and fever binarization skipped",
+            "Workflow B configuration skipped",
+            "Workflow B split construction skipped",
+            "Workflow B learning-curve training skipped",
+            "Workflow B result aggregation skipped",
+        ]
+        for marker in skip_markers:
             with self.subTest(marker=marker):
                 self.assertIn(marker, self.all_source)
 

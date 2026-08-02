@@ -50,6 +50,16 @@ requested mapping: `none=0`, `low=1`, and `high=2`.
 Open `colab_embedding_and_training.ipynb` in Google Colab for GPU embedding
 generation and reproducible supervised training. Before running it, select a GPU
 runtime and edit the clearly marked repository URL and Google Drive path cells.
-The notebook saves embeddings in a dedicated `generated_sentence_embeddings`
-directory and reuses them on later runs. Set `FORCE_RECOMPUTE=True` only after
-changing the source text, mapping, or embedding model.
+The notebook defaults to `LEGACY_REPRODUCTION_MODE=True`. This runs the isolated
+legacy workflow from raw `SynSUM.csv` and writes only under
+`legacy_reproduction/`. It does not reuse or overwrite modern embeddings.
+
+Set `LEGACY_REPRODUCTION_MODE=False` to run the existing modern learning-curve
+workflow. Modern embeddings remain in `generated_sentence_embeddings`. Set
+`FORCE_RECOMPUTE=True` only after changing the selected workflow's source text,
+mapping, or embedding model.
+
+The audit and known uncertainties are documented in
+`LEGACY_REPRODUCTION_AUDIT.md`. The exact legacy implementation is in
+`legacy_reproduction.py`; it is called by the notebook and can also be run as a
+CLI.
