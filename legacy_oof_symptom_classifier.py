@@ -32,7 +32,7 @@ class ClassifierConfig:
     model_class: str = "LegacyHeadOnlyModel"
     training_seed: int = 5
     head_dim: int = 256
-    learning_rate: float = e-3
+    learning_rate: float = 1e-3
     batch_size: int = 32
     max_epochs: int = 120
     early_stopping_patience: int = 5
