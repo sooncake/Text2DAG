@@ -31,6 +31,7 @@ class OOFGraphExperimentTests(unittest.TestCase):
             bayesian_network_to_adjacency,
             build_graph_dataset,
             evaluate_graph,
+            load_embedding_arrays,
             load_reference_adjacency,
             dag_to_discrete_bayesian_network,
             run_pc_learn,
@@ -45,6 +46,7 @@ class OOFGraphExperimentTests(unittest.TestCase):
         cls.bayesian_network_to_adjacency = staticmethod(bayesian_network_to_adjacency)
         cls.build_graph_dataset = staticmethod(build_graph_dataset)
         cls.evaluate_graph = staticmethod(evaluate_graph)
+        cls.load_embedding_arrays = staticmethod(load_embedding_arrays)
         cls.load_reference_adjacency = staticmethod(load_reference_adjacency)
         cls.dag_to_discrete_bayesian_network = staticmethod(
             dag_to_discrete_bayesian_network
@@ -108,6 +110,28 @@ class OOFGraphExperimentTests(unittest.TestCase):
         invalid[0.10] = np.array([1, 2])
         with self.assertRaises(AssertionError):
             self.validate_nested_subsets(outer, invalid)
+
+    def test_legacy_loader_retains_raw_fever_target(self) -> None:
+        with TemporaryDirectory() as directory:
+            path = Path(directory) / "embeddings.npz"
+            labels = np.asarray(
+                [[0, 1, 0, 2, 1], [1, 0, 1, 0, 0]], dtype=np.int64
+            )
+            np.savez_compressed(
+                path,
+                patient_ids=np.asarray([10, 11], dtype=np.int64),
+                X=np.zeros((2, 768), dtype=np.float32),
+                y=labels,
+                label_names=np.asarray(["dysp", "cough", "pain", "fever", "nasal"]),
+            )
+            _, _, modern_y, _ = self.load_embedding_arrays(
+                path, expected_patients=None
+            )
+            _, _, legacy_y, _ = self.load_embedding_arrays(
+                path, expected_patients=None, preserve_raw_fever=True
+            )
+        self.assertEqual(int(modern_y[0, 3]), 1)
+        self.assertEqual(int(legacy_y[0, 3]), 2)
 
     def test_graph_reconstruction_uses_ids_and_changes_only_symptoms(self) -> None:
         original = pd.DataFrame(
@@ -323,6 +347,9 @@ class OOFGraphStaticTests(unittest.TestCase):
             'implementation: str = "pgmpy"',
             'model_class: str = "DiscreteBayesianNetwork"',
             'conditional_independence_test: str = "g_sq"',
+            '"--classifier-backend"',
+            'from legacy_oof_symptom_classifier import ClassifierConfig',
+            'preserve_raw_fever=args.classifier_backend == "legacy"',
             "alpha: float = 0.05",
             'variant="stable" if config.stable else "orig"',
             "ci_test=config.conditional_independence_test",
@@ -338,6 +365,25 @@ class OOFGraphStaticTests(unittest.TestCase):
             "build_graph_dataset(",
             "align_adjacencies(",
             "validate_oof_integrity(",
+        ]
+        for marker in required:
+            with self.subTest(marker=marker):
+                self.assertIn(marker, source)
+
+    def test_legacy_oof_classifier_uses_legacy_head_settings(self) -> None:
+        source = Path(__file__).with_name(
+            "legacy_oof_symptom_classifier.py"
+        ).read_text(encoding="utf-8")
+        required = [
+            "from legacy_reproduction import LegacyHeadOnlyModel",
+            'implementation: str = "legacy_reproduction"',
+            'model_class: str = "LegacyHeadOnlyModel"',
+            "training_seed: int = 5",
+            "head_dim: int = 256",
+            "learning_rate: float = 3e-5",
+            "nn.BCEWithLogitsLoss()",
+            "torch.optim.AdamW(model.parameters(), lr=config.learning_rate)",
+            "predictions = (np.asarray(probabilities) > threshold)",
         ]
         for marker in required:
             with self.subTest(marker=marker):
