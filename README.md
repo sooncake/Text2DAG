@@ -69,8 +69,9 @@ for the oracle and all four OOF conditions:
 - algorithm: stable PC;
 - conditional-independence test: `g_sq`, pgmpy's likelihood-ratio G² test;
 - significance level: `alpha=0.05`;
-- output: a pgmpy PC PDAG, deterministically extended to an acyclic
-  `DiscreteBayesianNetwork` while retaining the learned skeleton;
+- output: `PC(return_type="dag")`, validated and represented as an acyclic
+  `DiscreteBayesianNetwork`; if pgmpy returns a cyclic result, its learned
+  skeleton is deterministically projected to a DAG before model construction;
 - maximum conditioning depth: `max_k=None`, translated to all other graph
   variables (`max_cond_vars = number_of_nodes - 2`) because pgmpy requires an
   integer limit.

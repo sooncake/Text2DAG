@@ -50,7 +50,6 @@ class PCConfig:
     conditional_independence_test_description: str = "likelihood-ratio G-square (G^2)"
     alpha: float = 0.05
     stable: bool = True
-    pc_return_type: str = "pdag"
     return_type: str = "dag"
     max_k: int | None = None
 
@@ -691,15 +690,15 @@ def run_pc_learn(
     estimator = PC(
         variant="stable" if config.stable else "orig",
         ci_test=config.conditional_independence_test,
-        return_type=config.pc_return_type,
+        return_type=config.return_type,
         significance_level=config.alpha,
         max_cond_vars=max_cond_vars,
         show_progress=show_progress,
     ).fit(encoded)
 
-    learned_pdag = estimator.causal_graph_
-    bayesian_network = pdag_to_discrete_bayesian_network(
-        learned_pdag,
+    learned_dag = estimator.causal_graph_
+    bayesian_network = dag_to_discrete_bayesian_network(
+        learned_dag,
         node_names,
         DiscreteBayesianNetwork,
     )
@@ -709,27 +708,25 @@ def run_pc_learn(
     return adjacency, edges, bayesian_network
 
 
-def pdag_to_discrete_bayesian_network(
-    pdag: Any,
+def dag_to_discrete_bayesian_network(
+    learned_dag: Any,
     node_names: Sequence[str],
     model_class: Any,
 ) -> Any:
-    """Create a deterministic acyclic BN extension of a pgmpy PC PDAG.
+    """Validate/project a pgmpy PC DAG into a DiscreteBayesianNetwork.
 
-    A finite-sample PC result can contain conflicting directed preferences and
-    therefore have no faithful DAG extension. We retain the complete learned
-    skeleton, preserve every compatible directed preference, and break any
-    remaining preference cycle deterministically by node name. Orienting all
-    skeleton edges forward in the resulting total order guarantees a true DAG.
+    pgmpy's fallback DAG completion can contain a directed cycle when a finite-
+    sample PC result has no faithful extension. We preserve every edge direction
+    when the returned graph is acyclic. If it is cyclic, we retain the complete
+    learned skeleton and project directions onto a deterministic total order.
     """
     names = list(node_names)
     node_set = set(names)
-    if set(pdag.nodes()) != node_set:
-        raise ValueError("PC PDAG and reference node sets differ.")
+    if set(learned_dag.nodes()) != node_set:
+        raise ValueError("PC DAG and reference node sets differ.")
 
-    directed_edges = set(pdag.directed_edges)
-    undirected_edges = set(pdag.undirected_edges)
-    for source, target in directed_edges | undirected_edges:
+    directed_edges = set(learned_dag.edges())
+    for source, target in directed_edges:
         if source not in node_set or target not in node_set:
             raise ValueError("PC returned an edge with an unknown endpoint.")
         if source == target:
@@ -755,7 +752,7 @@ def pdag_to_discrete_bayesian_network(
     rank = {name: index for index, name in enumerate(total_order)}
     skeleton_pairs = {
         frozenset((source, target))
-        for source, target in directed_edges | undirected_edges
+        for source, target in directed_edges
     }
     oriented_edges = []
     for pair in skeleton_pairs:
@@ -769,13 +766,16 @@ def pdag_to_discrete_bayesian_network(
     bayesian_network = model_class()
     bayesian_network.add_nodes_from(names)
     bayesian_network.add_edges_from(oriented_edges)
-    bayesian_network.graph["pc_pdag_conversion"] = {
-        "method": "deterministic_acyclic_total_order",
+    bayesian_network.graph["pc_dag_validation"] = {
+        "method": (
+            "unchanged_acyclic_dag"
+            if cycle_breaks == 0
+            else "deterministic_acyclic_projection"
+        ),
         "node_order": total_order,
-        "pdag_directed_edges": len(directed_edges),
-        "pdag_undirected_edges": len(undirected_edges),
+        "learned_directed_edges": len(directed_edges),
         "cycle_breaks": cycle_breaks,
-        "reversed_directed_preferences": int(reversed_preferences),
+        "reversed_directed_edges": int(reversed_preferences),
     }
     return bayesian_network
 
@@ -908,7 +908,7 @@ def run_graph_conditions(
         suffix = condition_suffixes[condition]
         edges.to_csv(output_dir / f"graph_edges_{suffix}.csv", index=False)
         _save_named_matrix(adjacency, output_dir / f"graph_adjacency_{suffix}.csv")
-        pdag_conversion = bayesian_network.graph["pc_pdag_conversion"]
+        dag_validation = bayesian_network.graph["pc_dag_validation"]
         graph_rows.append(
             {
                 "condition": condition,
@@ -917,17 +917,13 @@ def run_graph_conditions(
                 "conditional_independence_test": pc_config.conditional_independence_test,
                 "alpha": pc_config.alpha,
                 "stable": pc_config.stable,
-                "pc_return_type": pc_config.pc_return_type,
                 "return_type": pc_config.return_type,
                 "max_k": "None",
                 "effective_max_cond_vars": len(node_names) - 2,
-                "dag_completion_method": pdag_conversion["method"],
-                "pdag_directed_edges": pdag_conversion["pdag_directed_edges"],
-                "pdag_undirected_edges": pdag_conversion["pdag_undirected_edges"],
-                "dag_completion_cycle_breaks": pdag_conversion["cycle_breaks"],
-                "reversed_directed_preferences": pdag_conversion[
-                    "reversed_directed_preferences"
-                ],
+                "dag_validation_method": dag_validation["method"],
+                "learned_directed_edges": dag_validation["learned_directed_edges"],
+                "dag_cycle_breaks": dag_validation["cycle_breaks"],
+                "reversed_directed_edges": dag_validation["reversed_directed_edges"],
             }
         )
     graph_metrics = pd.DataFrame(graph_rows)
@@ -1062,7 +1058,7 @@ def run_experiment(args: argparse.Namespace) -> dict[str, Any]:
         "graph_conditions_share_exact_config": True,
         "graph_input": "all graph nodes independently factorized to sorted discrete category codes",
         "graph_metric_definition": {
-            "adjacency": "row=source, column=target; pgmpy PC PDAG deterministically extended to an acyclic DiscreteBayesianNetwork",
+            "adjacency": "row=source, column=target; pgmpy PC return_type=dag validated as an acyclic DiscreteBayesianNetwork",
             "SHD": "standard add/delete/reverse edit count; reversal costs one",
             "correlation": "Pearson correlation of off-diagonal binary adjacency entries",
             "precision_recall_F1": "ordered directed-edge entries",
@@ -1148,7 +1144,7 @@ def run_graph_only(args: argparse.Namespace) -> dict[str, Any]:
             "graph_discovery": asdict(pc_config),
             "graph_conditions_share_exact_config": True,
             "graph_metric_definition": {
-                "adjacency": "row=source, column=target; pgmpy PC PDAG deterministically extended to an acyclic DiscreteBayesianNetwork",
+                "adjacency": "row=source, column=target; pgmpy PC return_type=dag validated as an acyclic DiscreteBayesianNetwork",
                 "SHD": "standard add/delete/reverse edit count; reversal costs one",
                 "correlation": "Pearson correlation of off-diagonal binary adjacency entries",
                 "precision_recall_F1": "ordered directed-edge entries",
