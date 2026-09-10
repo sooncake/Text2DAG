@@ -141,9 +141,11 @@ predictions, metrics, graphs, and metadata are written persistently beneath
 `MyDrive/Text2DAG/`.
 
 The supplied expert DAG contains 16 nodes and 35 directed edges from the
-hand-specified reference. The reference term `dyspnea` is stored as `dysp` to
-match the existing SynSUM symptom-label contract. Every remaining node name
-must exactly match its corresponding `SynSUM.csv` column.
+hand-specified reference. Its machine-readable node names follow the SynSUM
+schema: `dysp`, `cold`, `hay_fever`, `pneu`, `self_empl`, and `days_at_home`
+correspond to dyspnea, common cold, hay fever, pneumonia, self-employed, and
+number of days at home. Every node name must exactly match its corresponding
+`SynSUM.csv` column.
 
 The older notebook below remains available for legacy and fixed-split
 reproduction.

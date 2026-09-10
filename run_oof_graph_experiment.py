@@ -829,6 +829,26 @@ def run_experiment(args: argparse.Namespace) -> dict[str, Any]:
     if str(device).startswith("cuda") and not torch.cuda.is_available():
         raise RuntimeError(f"Requested {device}, but CUDA is unavailable.")
 
+    # Validate every downstream input before starting the expensive nested-CV run.
+    original = load_structured_dataset(
+        args.structured_data, args.patient_id_column, args.structured_separator
+    )
+    if len(original) != len(patient_ids) or set(original["patient_id"]) != set(patient_ids):
+        raise ValueError("Structured SynSUM and embedding patient-ID sets must match exactly.")
+    reference = load_reference_adjacency(args.reference_adjacency)
+    node_names = reference.index.astype(str).tolist()
+    missing_symptoms = [name for name in LABEL_NAMES if name not in node_names]
+    if missing_symptoms:
+        raise ValueError(
+            f"Reference graph must contain all five symptom nodes: missing {missing_symptoms}"
+        )
+    missing_graph_columns = [name for name in node_names if name not in original.columns]
+    if missing_graph_columns:
+        raise ValueError(
+            "Reference graph node names must exactly match SynSUM columns; missing "
+            f"columns: {missing_graph_columns}"
+        )
+
     folds = create_outer_folds(patient_ids, y, seed=args.seed, n_splits=5)
     if len(patient_ids) == 10_000:
         assert all(len(fold.train_indices) == 8_000 for fold in folds)
@@ -888,19 +908,6 @@ def run_experiment(args: argparse.Namespace) -> dict[str, Any]:
     symptom_metrics.to_csv(
         output_dir / "classifier_per_symptom_metrics.csv", index=False
     )
-
-    original = load_structured_dataset(
-        args.structured_data, args.patient_id_column, args.structured_separator
-    )
-    if len(original) != len(patient_ids) or set(original["patient_id"]) != set(patient_ids):
-        raise ValueError("Structured SynSUM and embedding patient-ID sets must match exactly.")
-    reference = load_reference_adjacency(args.reference_adjacency)
-    node_names = reference.index.astype(str).tolist()
-    missing_symptoms = [name for name in LABEL_NAMES if name not in node_names]
-    if missing_symptoms:
-        raise ValueError(
-            f"Reference graph must contain all five symptom nodes: missing {missing_symptoms}"
-        )
 
     graph_datasets: dict[str, pd.DataFrame] = {"oracle": original}
     for fraction, table in oof_tables.items():
