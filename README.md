@@ -134,10 +134,16 @@ conditions, and performs a final leakage/artifact audit. The notebook defaults
 to the `codex/oof-graph-experiment` branch; change `REPOSITORY_BRANCH` to
 `main` after the pull request is merged.
 
-Place `SynSUM.csv` and the named expert/reference adjacency file
-`expert_dag_adjacency.csv` under `MyDrive/Text2DAG/inputs/` before running. All
-generated data, checkpoints, OOF predictions, metrics, graphs, and metadata are
-written persistently beneath `MyDrive/Text2DAG/`.
+Place `SynSUM.csv` under `MyDrive/Text2DAG/inputs/` before running. The named
+expert/reference adjacency `expert_dag_adjacency.csv` is versioned in this
+repository and loaded automatically. All generated data, checkpoints, OOF
+predictions, metrics, graphs, and metadata are written persistently beneath
+`MyDrive/Text2DAG/`.
+
+The supplied expert DAG contains 16 nodes and 35 directed edges from the
+hand-specified reference. The reference term `dyspnea` is stored as `dysp` to
+match the existing SynSUM symptom-label contract. Every remaining node name
+must exactly match its corresponding `SynSUM.csv` column.
 
 The older notebook below remains available for legacy and fixed-split
 reproduction.
