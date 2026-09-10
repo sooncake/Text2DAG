@@ -154,7 +154,7 @@ class OOFGraphExperimentTests(unittest.TestCase):
         self.assertEqual(list(aligned_reference.index), ["A", "B", "C"])
         self.assertEqual(list(aligned_learned.index), ["A", "B", "C"])
         metrics = self.evaluate_graph(reference, learned_shuffled)
-        self.assertEqual(metrics["SHD"], 2)
+        self.assertEqual(metrics["SHD"], 1)
         self.assertAlmostEqual(metrics["precision"], 0.5)
         self.assertAlmostEqual(metrics["recall"], 0.5)
         self.assertAlmostEqual(metrics["F1"], 0.5)

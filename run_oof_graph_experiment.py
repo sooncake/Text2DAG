@@ -756,9 +756,9 @@ def align_adjacencies(
 def evaluate_graph(reference: pd.DataFrame, learned: pd.DataFrame) -> dict[str, float | int]:
     """Evaluate aligned directed binary adjacency entries off the diagonal.
 
-    SHD is entrywise Hamming distance, so a pure reversal costs two. Precision,
-    recall, and F1 treat each ordered directed edge as one item. Correlation is
-    Pearson correlation over the same off-diagonal binary entries.
+    SHD uses the standard graph-edit definition: an addition, deletion, or edge
+    reversal each costs one. Precision, recall, and F1 treat each ordered directed
+    edge as one item. Correlation is Pearson correlation over the same entries.
     """
     reference, learned = align_adjacencies(reference, learned)
     reference_values = reference.to_numpy(dtype=np.int64)
@@ -778,8 +778,15 @@ def evaluate_graph(reference: pd.DataFrame, learned: pd.DataFrame) -> dict[str, 
         correlation = 0.0
     else:
         correlation = float(np.corrcoef(truth, prediction)[0, 1])
+    shd = 0
+    for i in range(len(reference)):
+        for j in range(i + 1, len(reference)):
+            reference_edge = (int(reference_values[i, j]), int(reference_values[j, i]))
+            learned_edge = (int(learned_values[i, j]), int(learned_values[j, i]))
+            if reference_edge != learned_edge:
+                shd += 1
     return {
-        "SHD": int(np.sum(truth != prediction)),
+        "SHD": shd,
         "correlation": correlation,
         "precision": float(precision),
         "recall": float(recall),
@@ -949,7 +956,7 @@ def run_experiment(args: argparse.Namespace) -> dict[str, Any]:
         "graph_input": "all graph nodes independently factorized to sorted discrete category codes",
         "graph_metric_definition": {
             "adjacency": "row=source, column=target; pgmpy PC DAG wrapped in DiscreteBayesianNetwork",
-            "SHD": "off-diagonal binary adjacency Hamming distance; reversal costs two",
+            "SHD": "standard add/delete/reverse edit count; reversal costs one",
             "correlation": "Pearson correlation of off-diagonal binary adjacency entries",
             "precision_recall_F1": "ordered directed-edge entries",
             "alignment": "learned matrix explicitly reordered by reference node names before metrics",

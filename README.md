@@ -65,7 +65,7 @@ causal-discovery implementation or graph metric functions. The new graph layer
 is therefore isolated in `run_oof_graph_experiment.py` and fixes these settings
 for the oracle and all four OOF conditions:
 
-- implementation: `pgmpy==1.0.0`;
+- implementation: `pgmpy==1.1.2`;
 - algorithm: stable PC;
 - conditional-independence test: `g_sq`, pgmpy's likelihood-ratio G² test;
 - significance level: `alpha=0.05`;
@@ -114,14 +114,14 @@ The output directory includes:
 - `graph_metrics.csv`, `pc_learn_config.json`, and `experiment_metadata.json`.
 
 `graph_metrics.csv` repeats the PC algorithm, G² test name, alpha, stability,
-orientation-rule, and conditioning-depth settings on every condition row.
+DAG return type, and conditioning-depth settings on every condition row.
 
 Graph matrices are explicitly aligned by node name before evaluation. The
-isolated metric definition treats rows as sources and columns as targets,
-expands an unoriented PC edge in both directions, calculates SHD as
-off-diagonal binary Hamming distance (so reversal costs two), and calculates
-correlation and precision/recall/F1 over the same ordered edge entries. These
-choices and all PC settings are recorded in the metadata rather than inferred
+isolated metric definition treats rows as sources and columns as targets. It
+evaluates the DAG completion returned by pgmpy, calculates SHD as off-diagonal
+graph edits (addition, deletion, and reversal each cost one), and calculates
+correlation and precision/recall/F1 over ordered edge entries. These choices and
+all PC settings are recorded in the metadata rather than inferred
 from DataFrame order.
 
 ## Google Colab
