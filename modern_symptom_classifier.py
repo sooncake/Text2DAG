@@ -23,12 +23,12 @@ from torch.utils.data import DataLoader, TensorDataset
 class ClassifierConfig:
     """Settings copied from the notebook's modern learning-curve workflow."""
 
-    hidden_dim: int = 128
+    hidden_dim: int = 256
     dropout: float = 0.25
-    learning_rate: float = 1e-3
+    learning_rate: float = 3e-5
     weight_decay: float = 1e-4
     batch_size: int = 32
-    max_epochs: int = 100
+    max_epochs: int = 120
     early_stopping_patience: int = 12
     binary_threshold: float = 0.5
     inner_cv_folds: int = 5
@@ -38,13 +38,13 @@ class ClassifierConfig:
 
 
 class SymptomMultiTaskMLP(nn.Module):
-    """One 768-to-128 hidden layer and five binary symptom outputs."""
+    """One 768-to-256 hidden layer and five binary symptom outputs."""
 
     def __init__(
         self,
         input_dim: int,
         num_labels: int,
-        hidden_dim: int = 128,
+        hidden_dim: int = 256,
         dropout: float = 0.25,
     ) -> None:
         super().__init__()
