@@ -48,12 +48,17 @@ requested mapping: `none=0`, `low=1`, and `high=2`.
 
 ## Strict five-fold OOF classifier and graph experiment
 
-`run_oof_graph_experiment.py` is a separate, leakage-safe extension of the
-modern supervised workflow. It consumes the existing patient embedding NPZ,
+`run_oof_graph_experiment.py` is a separate, leakage-safe OOF workflow. It
+consumes the existing patient embedding NPZ,
 uses one shared patient-level multilabel-stratified five-fold split, and trains
 the 5%, 10%, 20%, and 100% conditions as nested fractions of each outer 80%
 training pool. The architecture and training helpers live in
-`modern_symptom_classifier.py` and preserve the modern notebook settings.
+`modern_symptom_classifier.py` and preserve the modern notebook settings by
+default. Pass `--classifier-backend legacy` to instead use the legacy
+`768→256→5` linear head and reproduction training settings from
+`legacy_oof_symptom_classifier.py`/`legacy_reproduction.py`: no activation or
+feature standardization, unweighted BCE, AdamW at `3e-5`, raw fever targets
+`0/1/2`, validation-loss duration selection, and a strict `>0.5` threshold.
 
 For every condition, each patient receives exactly one prediction from the one
 outer-fold model that excluded that patient. The five held-out prediction sets
@@ -97,6 +102,12 @@ python run_oof_graph_experiment.py \
   --output-dir outputs/oof_graph_experiment \
   --device auto
 ```
+
+The Colab OOF graph notebook selects `--classifier-backend legacy` and writes
+to `oof_graph_experiment_legacy`, so earlier modern OOF artifacts are not
+silently reused. It keeps the existing ModernBERT patient feature NPZ; the
+legacy selection applies to the supervised classifier head and its training
+behavior.
 
 If OOF predictions already exist and only the pgmpy graph stage needs to be
 recomputed, add `--graph-only`. This rebuilds the four graph datasets from the

@@ -91,9 +91,12 @@ def _json_safe(value: Any) -> Any:
 
 
 def load_embedding_arrays(
-    path: str | Path, expected_patients: int | None = 10_000
+    path: str | Path,
+    expected_patients: int | None = 10_000,
+    *,
+    preserve_raw_fever: bool = False,
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
-    """Load the existing patient embeddings and modern binary targets."""
+    """Load patient embeddings and optionally retain legacy fever targets 0/1/2."""
     path = Path(path)
     if not path.is_file():
         raise FileNotFoundError(f"Patient embedding NPZ not found: {path}")
@@ -128,11 +131,18 @@ def load_embedding_arrays(
         raise ValueError("Embedding data contains NaN or infinite values.")
 
     y = y_original.copy()
-    y[:, LABEL_NAMES.index("fever")] = (
-        y_original[:, LABEL_NAMES.index("fever")] > 0
-    ).astype(np.int64)
-    if not set(np.unique(y)).issubset({0, 1}):
-        raise ValueError("All five modern classifier targets must be binary.")
+    if not preserve_raw_fever:
+        y[:, LABEL_NAMES.index("fever")] = (
+            y_original[:, LABEL_NAMES.index("fever")] > 0
+        ).astype(np.int64)
+        if not set(np.unique(y)).issubset({0, 1}):
+            raise ValueError("All five modern classifier targets must be binary.")
+    else:
+        non_fever = np.delete(y, LABEL_NAMES.index("fever"), axis=1)
+        if not set(np.unique(non_fever)).issubset({0, 1}):
+            raise ValueError("Legacy non-fever classifier targets must be binary.")
+        if not set(np.unique(y[:, LABEL_NAMES.index("fever")])).issubset({0, 1, 2}):
+            raise ValueError("Legacy fever targets must use only 0/1/2.")
     return patient_ids, X, y, label_names
 
 
@@ -282,18 +292,29 @@ def generate_oof_predictions(
     folds: Sequence[OuterFold],
     nested_subsets: Mapping[int, Mapping[float, np.ndarray]],
     *,
-    classifier_config: ClassifierConfig,
+    classifier_config: Any,
+    classifier_backend: str,
     device: torch.device,
     base_seed: int,
     checkpoint_dir: Path,
 ) -> tuple[dict[float, pd.DataFrame], list[dict[str, Any]]]:
     """Train all outer models and return one unseen prediction per patient."""
-    from modern_symptom_classifier import (
-        calculate_metrics,
-        predict_probabilities,
-        select_training_epochs,
-        train_final_classifier,
-    )
+    if classifier_backend == "legacy":
+        from legacy_oof_symptom_classifier import (
+            calculate_metrics,
+            predict_probabilities,
+            select_training_epochs,
+            train_final_classifier,
+        )
+    elif classifier_backend == "modern":
+        from modern_symptom_classifier import (
+            calculate_metrics,
+            predict_probabilities,
+            select_training_epochs,
+            train_final_classifier,
+        )
+    else:
+        raise ValueError(f"Unknown classifier backend: {classifier_backend}")
 
     checkpoint_dir.mkdir(parents=True, exist_ok=True)
     fold_ids = _fold_assignment_frame(patient_ids, folds)["outer_fold"].to_numpy()
@@ -312,6 +333,11 @@ def generate_oof_predictions(
             subset = np.asarray(nested_subsets[fold.fold_id][fraction], dtype=np.int64)
             percent = int(round(fraction * 100))
             model_seed = base_seed * 100_000 + fold.fold_id * 1_000 + percent
+            training_seed = (
+                classifier_config.training_seed
+                if classifier_backend == "legacy"
+                else model_seed
+            )
             final_epochs, cv_rows = select_training_epochs(
                 X,
                 y,
@@ -319,7 +345,7 @@ def generate_oof_predictions(
                 label_names,
                 classifier_config,
                 device,
-                model_seed,
+                training_seed,
             )
             for row in cv_rows:
                 inner_rows.append(
@@ -339,7 +365,7 @@ def generate_oof_predictions(
                 final_epochs,
                 classifier_config,
                 device,
-                model_seed,
+                training_seed,
             )
             probabilities = predict_probabilities(
                 model,
@@ -350,7 +376,7 @@ def generate_oof_predictions(
                 std,
                 classifier_config,
                 device,
-                model_seed,
+                training_seed,
             )
             _, predictions = calculate_metrics(
                 y[fold.test_indices],
@@ -377,7 +403,9 @@ def generate_oof_predictions(
                     "selected_training_patient_ids": patient_ids[subset],
                     "outer_test_patient_ids": patient_ids[fold.test_indices],
                     "final_epochs": final_epochs,
-                    "seed": model_seed,
+                    "seed": training_seed,
+                    "outer_experiment_seed": base_seed,
+                    "classifier_backend": classifier_backend,
                     "classifier_config": classifier_config.to_dict(),
                 },
                 checkpoint_path,
@@ -511,8 +539,9 @@ def calculate_classifier_outputs(
 def _binary_metrics(targets: Sequence[int], predictions: Sequence[int]) -> dict[str, float]:
     from sklearn.metrics import precision_recall_fscore_support
 
+    binary_targets = (np.asarray(targets) > 0).astype(np.int64)
     precision, recall, f1, _ = precision_recall_fscore_support(
-        targets, predictions, average="binary", zero_division=0
+        binary_targets, predictions, average="binary", zero_division=0
     )
     return {"precision": float(precision), "recall": float(recall), "f1": float(f1)}
 
@@ -933,13 +962,18 @@ def run_graph_conditions(
 
 def run_experiment(args: argparse.Namespace) -> dict[str, Any]:
     """Execute the complete classifier OOF and graph evaluation workflow."""
-    from modern_symptom_classifier import ClassifierConfig
+    if args.classifier_backend == "legacy":
+        from legacy_oof_symptom_classifier import ClassifierConfig
+    else:
+        from modern_symptom_classifier import ClassifierConfig
 
     output_dir = Path(args.output_dir)
     checkpoint_dir = output_dir / "checkpoints"
     output_dir.mkdir(parents=True, exist_ok=True)
     patient_ids, X, y, label_names = load_embedding_arrays(
-        args.embedding_npz, expected_patients=10_000
+        args.embedding_npz,
+        expected_patients=10_000,
+        preserve_raw_fever=args.classifier_backend == "legacy",
     )
     device = torch.device(
         "cuda" if args.device == "auto" and torch.cuda.is_available() else
@@ -968,13 +1002,16 @@ def run_experiment(args: argparse.Namespace) -> dict[str, Any]:
             f"columns: {missing_graph_columns}"
         )
 
-    folds = create_outer_folds(patient_ids, y, seed=args.seed, n_splits=5)
+    stratification_y = (y > 0).astype(np.int64)
+    folds = create_outer_folds(patient_ids, stratification_y, seed=args.seed, n_splits=5)
     if len(patient_ids) == 10_000:
         assert all(len(fold.train_indices) == 8_000 for fold in folds)
         assert all(len(fold.test_indices) == 2_000 for fold in folds)
     nested_subsets = {
         fold.fold_id: create_nested_training_subsets(
-            fold.train_indices, y, seed=args.seed * 100 + fold.fold_id
+            fold.train_indices,
+            stratification_y,
+            seed=args.seed * 100 + fold.fold_id,
         )
         for fold in folds
     }
@@ -1010,6 +1047,7 @@ def run_experiment(args: argparse.Namespace) -> dict[str, Any]:
         folds,
         nested_subsets,
         classifier_config=classifier_config,
+        classifier_backend=args.classifier_backend,
         device=device,
         base_seed=args.seed,
         checkpoint_dir=checkpoint_dir,
@@ -1050,10 +1088,26 @@ def run_experiment(args: argparse.Namespace) -> dict[str, Any]:
         "outer_folds": 5,
         "outer_fold_assignment_sha256": _sha256(output_dir / "outer_fold_assignments.csv"),
         "supervision_fractions_of_outer_training_pool": list(SUPERVISION_FRACTIONS),
+        "classifier_backend": args.classifier_backend,
         "classifier": classifier_config.to_dict(),
-        "classifier_source": "modern_symptom_classifier.py factored from colab_embedding_and_training.ipynb",
-        "fever_definition": "classifier target 0=no fever; 1=original low or high fever",
-        "oof_threshold_operator": ">=",
+        "classifier_source": (
+            "legacy_oof_symptom_classifier.py using LegacyHeadOnlyModel from legacy_reproduction.py"
+            if args.classifier_backend == "legacy"
+            else "modern_symptom_classifier.py factored from colab_embedding_and_training.ipynb"
+        ),
+        "classifier_embedding_source": (
+            "existing patient_embeddings_and_labels.npz; supervised head/training is legacy"
+            if args.classifier_backend == "legacy"
+            else "existing patient_embeddings_and_labels.npz; supervised head/training is modern"
+        ),
+        "fever_definition": (
+            "legacy training target retains 0/1/2; evaluation and graph prediction use binary presence"
+            if args.classifier_backend == "legacy"
+            else "classifier target 0=no fever; 1=original low or high fever"
+        ),
+        "oof_threshold_operator": (
+            ">" if args.classifier_backend == "legacy" else ">="
+        ),
         "graph_discovery": asdict(pc_config),
         "graph_conditions_share_exact_config": True,
         "graph_input": "all graph nodes independently factorized to sorted discrete category codes",
@@ -1176,6 +1230,12 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--structured-separator", default=";")
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--device", default="auto")
+    parser.add_argument(
+        "--classifier-backend",
+        choices=("modern", "legacy"),
+        default="modern",
+        help="Use the modern classifier or the legacy reproduction head/training settings.",
+    )
     parser.add_argument("--show-pc-progress", action="store_true")
     parser.add_argument(
         "--graph-only",

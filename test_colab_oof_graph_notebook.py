@@ -37,6 +37,18 @@ class ColabOOFGraphNotebookTests(unittest.TestCase):
             "build_gfs_sentence_mapping.py",
             "prepare_patient_embeddings.py",
             "run_oof_graph_experiment.py",
+            "legacy_oof_symptom_classifier.py",
+            "from legacy_oof_symptom_classifier import ClassifierConfig",
+            "classifier_config.implementation == 'legacy_reproduction'",
+            "classifier_config.model_class == 'LegacyHeadOnlyModel'",
+            "classifier_config.training_seed == 5",
+            "classifier_config.head_dim == 256",
+            "classifier_config.learning_rate == 3e-5",
+            "classifier_config.feature_standardization is False",
+            "classifier_config.threshold_operator == '>'",
+            "'--classifier-backend', 'legacy'",
+            "saved_experiment_metadata.get('classifier_backend') == 'legacy'",
+            "oof_graph_experiment_legacy",
             "SUPERVISION_FRACTIONS == (0.05, 0.10, 0.20, 1.00)",
             "pc_config.implementation == 'pgmpy'",
             "pc_config.model_class == 'DiscreteBayesianNetwork'",
@@ -62,6 +74,9 @@ class ColabOOFGraphNotebookTests(unittest.TestCase):
 
     def test_notebook_never_reads_in_sample_prediction_artifacts(self) -> None:
         self.assertNotIn("all_dataset_predictions", self.code_source)
+        self.assertNotIn(
+            "from modern_symptom_classifier import ClassifierConfig", self.code_source
+        )
 
 
 if __name__ == "__main__":
