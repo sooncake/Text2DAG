@@ -69,7 +69,8 @@ for the oracle and all four OOF conditions:
 - algorithm: stable PC;
 - conditional-independence test: `g_sq`, pgmpy's likelihood-ratio G² test;
 - significance level: `alpha=0.05`;
-- output: one DAG completion, wrapped as a pgmpy `DiscreteBayesianNetwork`;
+- output: a pgmpy PC PDAG, deterministically extended to an acyclic
+  `DiscreteBayesianNetwork` while retaining the learned skeleton;
 - maximum conditioning depth: `max_k=None`, translated to all other graph
   variables (`max_cond_vars = number_of_nodes - 2`) because pgmpy requires an
   integer limit.
@@ -95,6 +96,10 @@ python run_oof_graph_experiment.py \
   --output-dir outputs/oof_graph_experiment \
   --device auto
 ```
+
+If OOF predictions already exist and only the pgmpy graph stage needs to be
+recomputed, add `--graph-only`. This rebuilds the four graph datasets from the
+saved OOF prediction CSVs and does not retrain the classifiers.
 
 The strict default is exactly 10,000 unique patients. For each fold this yields
 8,000 outer-training and 2,000 held-out patients, with nested training sizes of

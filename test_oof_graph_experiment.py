@@ -32,6 +32,7 @@ class OOFGraphExperimentTests(unittest.TestCase):
             build_graph_dataset,
             evaluate_graph,
             load_reference_adjacency,
+            pdag_to_discrete_bayesian_network,
             run_pc_learn,
             validate_nested_subsets,
             validate_oof_integrity,
@@ -45,6 +46,9 @@ class OOFGraphExperimentTests(unittest.TestCase):
         cls.build_graph_dataset = staticmethod(build_graph_dataset)
         cls.evaluate_graph = staticmethod(evaluate_graph)
         cls.load_reference_adjacency = staticmethod(load_reference_adjacency)
+        cls.pdag_to_discrete_bayesian_network = staticmethod(
+            pdag_to_discrete_bayesian_network
+        )
         cls.run_pc_learn = staticmethod(run_pc_learn)
         cls.validate_nested_subsets = staticmethod(validate_nested_subsets)
         cls.validate_oof_integrity = staticmethod(validate_oof_integrity)
@@ -58,6 +62,7 @@ class OOFGraphExperimentTests(unittest.TestCase):
         self.assertEqual(config.conditional_independence_test, "g_sq")
         self.assertEqual(config.alpha, 0.05)
         self.assertTrue(config.stable)
+        self.assertEqual(config.pc_return_type, "pdag")
         self.assertEqual(config.return_type, "dag")
         self.assertIsNone(config.max_k)
 
@@ -186,15 +191,18 @@ class OOFGraphExperimentTests(unittest.TestCase):
     def test_pc_invocation_passes_fixed_gsquare_settings(self) -> None:
         captured = {}
 
-        class FakeDAG:
+        class FakePDAG:
+            directed_edges = {("A", "B")}
+            undirected_edges = set()
+
             @staticmethod
-            def edges():
-                return [("A", "B")]
+            def nodes():
+                return ["A", "B"]
 
         class FakePC:
             def __init__(self, **kwargs):
                 captured.update(kwargs)
-                self.causal_graph_ = FakeDAG()
+                self.causal_graph_ = FakePDAG()
 
             def fit(self, data):
                 captured["data"] = data
@@ -204,6 +212,7 @@ class OOFGraphExperimentTests(unittest.TestCase):
             def __init__(self):
                 self._nodes = []
                 self._edges = []
+                self.graph = {}
 
             def add_nodes_from(self, nodes):
                 self._nodes.extend(nodes)
@@ -234,11 +243,50 @@ class OOFGraphExperimentTests(unittest.TestCase):
         self.assertEqual(captured["significance_level"], 0.05)
         self.assertEqual(captured["ci_test"], "g_sq")
         self.assertEqual(captured["variant"], "stable")
-        self.assertEqual(captured["return_type"], "dag")
+        self.assertEqual(captured["return_type"], "pdag")
         self.assertEqual(captured["max_cond_vars"], 0)
         self.assertEqual(captured["data"].columns.tolist(), ["A", "B"])
         self.assertIsInstance(model, FakeDiscreteBayesianNetwork)
         self.assertEqual(int(adjacency.loc["A", "B"]), 1)
+
+    def test_cyclic_pdag_preferences_are_projected_to_a_true_dag(self) -> None:
+        class CyclicPDAG:
+            directed_edges = {("A", "B"), ("B", "C"), ("C", "A")}
+            undirected_edges = {("C", "D")}
+
+            @staticmethod
+            def nodes():
+                return ["A", "B", "C", "D"]
+
+        class StrictFakeBayesianNetwork:
+            def __init__(self):
+                self._nodes = []
+                self._edges = []
+                self.graph = {}
+
+            def add_nodes_from(self, nodes):
+                self._nodes.extend(nodes)
+
+            def add_edges_from(self, edges):
+                self._edges.extend(edges)
+
+            def nodes(self):
+                return self._nodes
+
+            def edges(self):
+                return self._edges
+
+        model = self.pdag_to_discrete_bayesian_network(
+            CyclicPDAG(),
+            ["A", "B", "C", "D"],
+            StrictFakeBayesianNetwork,
+        )
+        completion = model.graph["pc_pdag_conversion"]
+        rank = {name: index for index, name in enumerate(completion["node_order"])}
+        self.assertTrue(all(rank[source] < rank[target] for source, target in model.edges()))
+        self.assertEqual(len(model.edges()), 4)
+        self.assertGreaterEqual(completion["cycle_breaks"], 1)
+        self.assertGreaterEqual(completion["reversed_directed_preferences"], 1)
 
     def test_reference_adjacency_requires_named_square_matrix(self) -> None:
         with TemporaryDirectory() as directory:
@@ -278,7 +326,8 @@ class OOFGraphStaticTests(unittest.TestCase):
             'variant="stable" if config.stable else "orig"',
             "ci_test=config.conditional_independence_test",
             "significance_level=config.alpha",
-            "bayesian_network = DiscreteBayesianNetwork()",
+            "pdag_to_discrete_bayesian_network(",
+            '"--graph-only"',
             '"outer_fold_assignments.csv"',
             '"classifier_fold_metrics.csv"',
             '"classifier_oof_metrics.csv"',

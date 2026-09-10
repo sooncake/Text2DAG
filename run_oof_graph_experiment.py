@@ -50,6 +50,7 @@ class PCConfig:
     conditional_independence_test_description: str = "likelihood-ratio G-square (G^2)"
     alpha: float = 0.05
     stable: bool = True
+    pc_return_type: str = "pdag"
     return_type: str = "dag"
     max_k: int | None = None
 
@@ -690,20 +691,93 @@ def run_pc_learn(
     estimator = PC(
         variant="stable" if config.stable else "orig",
         ci_test=config.conditional_independence_test,
-        return_type=config.return_type,
+        return_type=config.pc_return_type,
         significance_level=config.alpha,
         max_cond_vars=max_cond_vars,
         show_progress=show_progress,
     ).fit(encoded)
 
-    learned_dag = estimator.causal_graph_
-    bayesian_network = DiscreteBayesianNetwork()
-    bayesian_network.add_nodes_from(node_names)
-    bayesian_network.add_edges_from(learned_dag.edges())
+    learned_pdag = estimator.causal_graph_
+    bayesian_network = pdag_to_discrete_bayesian_network(
+        learned_pdag,
+        node_names,
+        DiscreteBayesianNetwork,
+    )
     learned_names = set(bayesian_network.nodes())
     assert learned_names == set(node_names), "PC returned an unexpected node set."
     adjacency, edges = bayesian_network_to_adjacency(bayesian_network, node_names)
     return adjacency, edges, bayesian_network
+
+
+def pdag_to_discrete_bayesian_network(
+    pdag: Any,
+    node_names: Sequence[str],
+    model_class: Any,
+) -> Any:
+    """Create a deterministic acyclic BN extension of a pgmpy PC PDAG.
+
+    A finite-sample PC result can contain conflicting directed preferences and
+    therefore have no faithful DAG extension. We retain the complete learned
+    skeleton, preserve every compatible directed preference, and break any
+    remaining preference cycle deterministically by node name. Orienting all
+    skeleton edges forward in the resulting total order guarantees a true DAG.
+    """
+    names = list(node_names)
+    node_set = set(names)
+    if set(pdag.nodes()) != node_set:
+        raise ValueError("PC PDAG and reference node sets differ.")
+
+    directed_edges = set(pdag.directed_edges)
+    undirected_edges = set(pdag.undirected_edges)
+    for source, target in directed_edges | undirected_edges:
+        if source not in node_set or target not in node_set:
+            raise ValueError("PC returned an edge with an unknown endpoint.")
+        if source == target:
+            raise ValueError("PC returned a self-loop.")
+
+    incoming: dict[str, set[str]] = {name: set() for name in names}
+    for source, target in directed_edges:
+        incoming[target].add(source)
+
+    remaining = set(names)
+    total_order: list[str] = []
+    cycle_breaks = 0
+    while remaining:
+        sources = [name for name in remaining if not (incoming[name] & remaining)]
+        if sources:
+            selected = min(sources, key=lambda value: (str(value), repr(value)))
+        else:
+            selected = min(remaining, key=lambda value: (str(value), repr(value)))
+            cycle_breaks += 1
+        total_order.append(selected)
+        remaining.remove(selected)
+
+    rank = {name: index for index, name in enumerate(total_order)}
+    skeleton_pairs = {
+        frozenset((source, target))
+        for source, target in directed_edges | undirected_edges
+    }
+    oriented_edges = []
+    for pair in skeleton_pairs:
+        source, target = sorted(pair, key=rank.__getitem__)
+        oriented_edges.append((source, target))
+    oriented_edges.sort(key=lambda edge: (rank[edge[0]], rank[edge[1]]))
+
+    reversed_preferences = sum(
+        rank[source] > rank[target] for source, target in directed_edges
+    )
+    bayesian_network = model_class()
+    bayesian_network.add_nodes_from(names)
+    bayesian_network.add_edges_from(oriented_edges)
+    bayesian_network.graph["pc_pdag_conversion"] = {
+        "method": "deterministic_acyclic_total_order",
+        "node_order": total_order,
+        "pdag_directed_edges": len(directed_edges),
+        "pdag_undirected_edges": len(undirected_edges),
+        "cycle_breaks": cycle_breaks,
+        "reversed_directed_preferences": int(reversed_preferences),
+    }
+    return bayesian_network
 
 
 def bayesian_network_to_adjacency(
@@ -796,6 +870,69 @@ def evaluate_graph(reference: pd.DataFrame, learned: pd.DataFrame) -> dict[str, 
 
 def _save_named_matrix(frame: pd.DataFrame, path: Path) -> None:
     frame.to_csv(path, index=True, index_label="node")
+
+
+def run_graph_conditions(
+    graph_datasets: Mapping[str, pd.DataFrame],
+    reference: pd.DataFrame,
+    output_dir: Path,
+    *,
+    show_progress: bool = False,
+) -> tuple[pd.DataFrame, PCConfig]:
+    """Run the fixed pgmpy PC configuration for every graph condition."""
+    node_names = reference.index.astype(str).tolist()
+    expected_conditions = ["oracle", "FS_5", "FS_10", "FS_20", "FS_100"]
+    if set(graph_datasets) != set(expected_conditions):
+        raise ValueError(
+            f"Expected graph conditions {expected_conditions}; found {list(graph_datasets)}."
+        )
+
+    pc_config = PCConfig()
+    (output_dir / "pc_learn_config.json").write_text(
+        json.dumps(asdict(pc_config), indent=2), encoding="utf-8"
+    )
+    condition_suffixes = {
+        "oracle": "oracle",
+        **{CONDITION_NAMES[fraction]: FILE_SUFFIXES[fraction] for fraction in SUPERVISION_FRACTIONS},
+    }
+    graph_rows: list[dict[str, Any]] = []
+    for condition in expected_conditions:
+        adjacency, edges, bayesian_network = run_pc_learn(
+            graph_datasets[condition],
+            node_names,
+            pc_config,
+            show_progress=show_progress,
+        )
+        aligned_reference, adjacency = align_adjacencies(reference, adjacency)
+        assert list(aligned_reference.index) == list(adjacency.index)
+        suffix = condition_suffixes[condition]
+        edges.to_csv(output_dir / f"graph_edges_{suffix}.csv", index=False)
+        _save_named_matrix(adjacency, output_dir / f"graph_adjacency_{suffix}.csv")
+        pdag_conversion = bayesian_network.graph["pc_pdag_conversion"]
+        graph_rows.append(
+            {
+                "condition": condition,
+                **evaluate_graph(reference, adjacency),
+                "algorithm": pc_config.algorithm,
+                "conditional_independence_test": pc_config.conditional_independence_test,
+                "alpha": pc_config.alpha,
+                "stable": pc_config.stable,
+                "pc_return_type": pc_config.pc_return_type,
+                "return_type": pc_config.return_type,
+                "max_k": "None",
+                "effective_max_cond_vars": len(node_names) - 2,
+                "dag_completion_method": pdag_conversion["method"],
+                "pdag_directed_edges": pdag_conversion["pdag_directed_edges"],
+                "pdag_undirected_edges": pdag_conversion["pdag_undirected_edges"],
+                "dag_completion_cycle_breaks": pdag_conversion["cycle_breaks"],
+                "reversed_directed_preferences": pdag_conversion[
+                    "reversed_directed_preferences"
+                ],
+            }
+        )
+    graph_metrics = pd.DataFrame(graph_rows)
+    graph_metrics.to_csv(output_dir / "graph_metrics.csv", index=False)
+    return graph_metrics, pc_config
 
 
 def run_experiment(args: argparse.Namespace) -> dict[str, Any]:
@@ -902,42 +1039,12 @@ def run_experiment(args: argparse.Namespace) -> dict[str, Any]:
         dataset.to_csv(output_dir / f"graph_dataset_{suffix}.csv", index=False)
         graph_datasets[CONDITION_NAMES[fraction]] = dataset
 
-    pc_config = PCConfig()
-    (output_dir / "pc_learn_config.json").write_text(
-        json.dumps(asdict(pc_config), indent=2), encoding="utf-8"
+    _, pc_config = run_graph_conditions(
+        graph_datasets,
+        reference,
+        output_dir,
+        show_progress=args.show_pc_progress,
     )
-    graph_rows: list[dict[str, Any]] = []
-    condition_suffixes = {
-        "oracle": "oracle",
-        **{CONDITION_NAMES[fraction]: FILE_SUFFIXES[fraction] for fraction in SUPERVISION_FRACTIONS},
-    }
-    for condition in ["oracle", "FS_5", "FS_10", "FS_20", "FS_100"]:
-        adjacency, edges, _bayesian_network = run_pc_learn(
-            graph_datasets[condition],
-            node_names,
-            pc_config,
-            show_progress=args.show_pc_progress,
-        )
-        aligned_reference, adjacency = align_adjacencies(reference, adjacency)
-        assert list(aligned_reference.index) == list(adjacency.index)
-        suffix = condition_suffixes[condition]
-        edges.to_csv(output_dir / f"graph_edges_{suffix}.csv", index=False)
-        _save_named_matrix(adjacency, output_dir / f"graph_adjacency_{suffix}.csv")
-        graph_rows.append(
-            {
-                "condition": condition,
-                **evaluate_graph(reference, adjacency),
-                "algorithm": pc_config.algorithm,
-                "conditional_independence_test": pc_config.conditional_independence_test,
-                "alpha": pc_config.alpha,
-                "stable": pc_config.stable,
-                "return_type": pc_config.return_type,
-                "max_k": "None",
-                "effective_max_cond_vars": len(node_names) - 2,
-            }
-        )
-    graph_metrics = pd.DataFrame(graph_rows)
-    graph_metrics.to_csv(output_dir / "graph_metrics.csv", index=False)
 
     metadata = {
         "status": "completed",
@@ -955,7 +1062,7 @@ def run_experiment(args: argparse.Namespace) -> dict[str, Any]:
         "graph_conditions_share_exact_config": True,
         "graph_input": "all graph nodes independently factorized to sorted discrete category codes",
         "graph_metric_definition": {
-            "adjacency": "row=source, column=target; pgmpy PC DAG wrapped in DiscreteBayesianNetwork",
+            "adjacency": "row=source, column=target; pgmpy PC PDAG deterministically extended to an acyclic DiscreteBayesianNetwork",
             "SHD": "standard add/delete/reverse edit count; reversal costs one",
             "correlation": "Pearson correlation of off-diagonal binary adjacency entries",
             "precision_recall_F1": "ordered directed-edge entries",
@@ -988,6 +1095,78 @@ def run_experiment(args: argparse.Namespace) -> dict[str, Any]:
     return metadata
 
 
+def run_graph_only(args: argparse.Namespace) -> dict[str, Any]:
+    """Recompute graph artifacts from saved OOF predictions without retraining."""
+    output_dir = Path(args.output_dir)
+    if not output_dir.is_dir():
+        raise FileNotFoundError(f"OOF output directory not found: {output_dir}")
+    original = load_structured_dataset(
+        args.structured_data, args.patient_id_column, args.structured_separator
+    )
+    reference = load_reference_adjacency(args.reference_adjacency)
+    node_names = reference.index.astype(str).tolist()
+    missing_graph_columns = [name for name in node_names if name not in original.columns]
+    if missing_graph_columns:
+        raise ValueError(
+            "Reference graph node names must exactly match structured-data columns; "
+            f"missing: {missing_graph_columns}"
+        )
+
+    graph_datasets: dict[str, pd.DataFrame] = {"oracle": original}
+    for fraction in SUPERVISION_FRACTIONS:
+        suffix = FILE_SUFFIXES[fraction]
+        oof_path = output_dir / f"oof_predictions_{suffix}.csv"
+        if not oof_path.is_file():
+            raise FileNotFoundError(f"Saved OOF predictions not found: {oof_path}")
+        oof_table = pd.read_csv(oof_path)
+        graph_datasets[CONDITION_NAMES[fraction]] = build_graph_dataset(
+            original, oof_table, LABEL_NAMES
+        )
+
+    graph_metrics, pc_config = run_graph_conditions(
+        graph_datasets,
+        reference,
+        output_dir,
+        show_progress=args.show_pc_progress,
+    )
+    metadata_path = output_dir / "experiment_metadata.json"
+    if metadata_path.is_file():
+        try:
+            metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            metadata = {}
+    else:
+        metadata = {}
+    runtime = dict(metadata.get("runtime", {}))
+    runtime.pop("causal_learn", None)
+    runtime["pgmpy"] = _package_version("pgmpy")
+    metadata.update(
+        {
+            "status": "completed",
+            "graph_recomputed_at_utc": datetime.now(timezone.utc).isoformat(),
+            "graph_recomputed_without_classifier_retraining": True,
+            "graph_discovery": asdict(pc_config),
+            "graph_conditions_share_exact_config": True,
+            "graph_metric_definition": {
+                "adjacency": "row=source, column=target; pgmpy PC PDAG deterministically extended to an acyclic DiscreteBayesianNetwork",
+                "SHD": "standard add/delete/reverse edit count; reversal costs one",
+                "correlation": "Pearson correlation of off-diagonal binary adjacency entries",
+                "precision_recall_F1": "ordered directed-edge entries",
+                "alignment": "learned matrix explicitly reordered by reference node names before metrics",
+            },
+            "runtime": runtime,
+        }
+    )
+    metadata_path.write_text(json.dumps(_json_safe(metadata), indent=2), encoding="utf-8")
+    return {
+        "status": "completed",
+        "mode": "graph-only",
+        "conditions": graph_metrics["condition"].tolist(),
+        "graph_metrics": str(output_dir / "graph_metrics.csv"),
+        "graph_discovery": asdict(pc_config),
+    }
+
+
 def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
@@ -1002,11 +1181,17 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--device", default="auto")
     parser.add_argument("--show-pc-progress", action="store_true")
+    parser.add_argument(
+        "--graph-only",
+        action="store_true",
+        help="Reuse saved OOF prediction CSVs and recompute only pgmpy graph artifacts.",
+    )
     return parser.parse_args(argv)
 
 
 def main(argv: Sequence[str] | None = None) -> None:
-    metadata = run_experiment(parse_args(argv))
+    args = parse_args(argv)
+    metadata = run_graph_only(args) if args.graph_only else run_experiment(args)
     print(json.dumps(_json_safe(metadata), indent=2))
 
 
