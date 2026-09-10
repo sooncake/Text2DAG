@@ -42,6 +42,7 @@ class ColabOOFGraphNotebookTests(unittest.TestCase):
             "pc_config.model_class == 'DiscreteBayesianNetwork'",
             "pc_config.conditional_independence_test == 'g_sq'",
             "pc_config.alpha == 0.05",
+            "pc_config.pc_return_type == 'pdag'",
             "classifier_oof_metrics.csv",
             "classifier_per_symptom_metrics.csv",
             "classifier_fold_metrics.csv",

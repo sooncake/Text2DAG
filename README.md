@@ -65,12 +65,15 @@ causal-discovery implementation or graph metric functions. The new graph layer
 is therefore isolated in `run_oof_graph_experiment.py` and fixes these settings
 for the oracle and all four OOF conditions:
 
-- implementation: `causal-learn==0.1.4.8`;
+- implementation: `pgmpy==1.1.2`;
 - algorithm: stable PC;
-- conditional-independence test: `gsq`, causal-learn's likelihood-ratio G² test;
+- conditional-independence test: `g_sq`, pgmpy's likelihood-ratio G² test;
 - significance level: `alpha=0.05`;
-- collider rule: `uc_rule=0`, `uc_priority=2`;
-- maximum conditioning depth: `max_k=None` (no added cap).
+- output: a pgmpy PC PDAG, deterministically extended to an acyclic
+  `DiscreteBayesianNetwork` while retaining the learned skeleton;
+- maximum conditioning depth: `max_k=None`, translated to all other graph
+  variables (`max_cond_vars = number_of_nodes - 2`) because pgmpy requires an
+  integer limit.
 
 The reference graph must be a named binary adjacency CSV. Its first column
 contains node names; the remaining square matrix uses rows as sources and
@@ -94,6 +97,10 @@ python run_oof_graph_experiment.py \
   --device auto
 ```
 
+If OOF predictions already exist and only the pgmpy graph stage needs to be
+recomputed, add `--graph-only`. This rebuilds the four graph datasets from the
+saved OOF prediction CSVs and does not retrain the classifiers.
+
 The strict default is exactly 10,000 unique patients. For each fold this yields
 8,000 outer-training and 2,000 held-out patients, with nested training sizes of
 400, 800, 1,600, and 8,000. The structured-data patient ID defaults to the
@@ -107,19 +114,19 @@ The output directory includes:
 - `oof_predictions_005/010/020/100.csv` plus matching NPZ files;
 - fold-level, complete-OOF, per-symptom, and inner-CV classifier metrics;
 - the four reconstructed `graph_dataset_*.csv` files;
-- oracle and OOF graph edge lists, metric adjacencies, and raw causal-learn
-  endpoint matrices;
+- oracle and OOF pgmpy `DiscreteBayesianNetwork` edge lists and named DAG
+  adjacencies;
 - `graph_metrics.csv`, `pc_learn_config.json`, and `experiment_metadata.json`.
 
 `graph_metrics.csv` repeats the PC algorithm, G² test name, alpha, stability,
-orientation-rule, and conditioning-depth settings on every condition row.
+DAG return type, and conditioning-depth settings on every condition row.
 
 Graph matrices are explicitly aligned by node name before evaluation. The
-isolated metric definition treats rows as sources and columns as targets,
-expands an unoriented PC edge in both directions, calculates SHD as
-off-diagonal binary Hamming distance (so reversal costs two), and calculates
-correlation and precision/recall/F1 over the same ordered edge entries. These
-choices and all PC settings are recorded in the metadata rather than inferred
+isolated metric definition treats rows as sources and columns as targets. It
+evaluates the DAG completion returned by pgmpy, calculates SHD as off-diagonal
+graph edits (addition, deletion, and reversal each cost one), and calculates
+correlation and precision/recall/F1 over ordered edge entries. These choices and
+all PC settings are recorded in the metadata rather than inferred
 from DataFrame order.
 
 ## Google Colab
