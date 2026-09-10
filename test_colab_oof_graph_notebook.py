@@ -33,12 +33,14 @@ class ColabOOFGraphNotebookTests(unittest.TestCase):
     def test_complete_colab_workflow_is_present(self) -> None:
         required = [
             "drive.mount('/content/drive')",
-            "REPOSITORY_BRANCH = 'codex/oof-graph-experiment'",
+            "REPOSITORY_BRANCH = 'main'",
             "build_gfs_sentence_mapping.py",
             "prepare_patient_embeddings.py",
             "run_oof_graph_experiment.py",
             "SUPERVISION_FRACTIONS == (0.05, 0.10, 0.20, 1.00)",
-            "pc_config.conditional_independence_test == 'gsq'",
+            "pc_config.implementation == 'pgmpy'",
+            "pc_config.model_class == 'DiscreteBayesianNetwork'",
+            "pc_config.conditional_independence_test == 'g_sq'",
             "pc_config.alpha == 0.05",
             "classifier_oof_metrics.csv",
             "classifier_per_symptom_metrics.csv",
