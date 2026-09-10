@@ -124,6 +124,24 @@ from DataFrame order.
 
 ## Google Colab
 
+For the complete strict OOF-to-graph experiment, open
+`colab_oof_graph_experiment.ipynb` in Colab and run it from top to bottom. It
+mounts Google Drive, clones/updates the experiment branch, installs the pinned
+dependencies, builds or reuses the sentence mapping and patient embeddings,
+trains the 5%/10%/20%/100% lightweight heads across the shared five outer
+folds, displays symptom metrics, runs the oracle and four OOF PC-learn graph
+conditions, and performs a final leakage/artifact audit. The notebook defaults
+to the `codex/oof-graph-experiment` branch; change `REPOSITORY_BRANCH` to
+`main` after the pull request is merged.
+
+Place `SynSUM.csv` and the named expert/reference adjacency file
+`expert_dag_adjacency.csv` under `MyDrive/Text2DAG/inputs/` before running. All
+generated data, checkpoints, OOF predictions, metrics, graphs, and metadata are
+written persistently beneath `MyDrive/Text2DAG/`.
+
+The older notebook below remains available for legacy and fixed-split
+reproduction.
+
 Open `colab_embedding_and_training.ipynb` in Google Colab for GPU embedding
 generation and reproducible supervised training. Before running it, select a GPU
 runtime and edit the clearly marked repository URL and Google Drive path cells.
