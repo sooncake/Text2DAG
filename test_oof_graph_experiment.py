@@ -2,8 +2,9 @@
 
 from __future__ import annotations
 
-import unittest
+import ast
 import sys
+import unittest
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from types import ModuleType, SimpleNamespace
@@ -235,6 +236,19 @@ class OOFGraphExperimentTests(unittest.TestCase):
 
 
 class OOFGraphStaticTests(unittest.TestCase):
+    def test_torch_is_imported_at_module_scope(self) -> None:
+        source = Path(__file__).with_name("run_oof_graph_experiment.py").read_text(
+            encoding="utf-8"
+        )
+        tree = ast.parse(source)
+        imported_names = {
+            alias.name
+            for node in tree.body
+            if isinstance(node, ast.Import)
+            for alias in node.names
+        }
+        self.assertIn("torch", imported_names)
+
     def test_pc_call_and_required_artifacts_are_present(self) -> None:
         source = Path(__file__).with_name("run_oof_graph_experiment.py").read_text(
             encoding="utf-8"

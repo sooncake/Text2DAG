@@ -20,6 +20,7 @@ from typing import Any, Final, Mapping, Sequence
 
 import numpy as np
 import pandas as pd
+import torch
 from prepare_patient_embeddings import EMBEDDING_DIM, LABEL_NAMES
 
 
@@ -812,8 +813,6 @@ def _save_named_matrix(frame: pd.DataFrame, path: Path) -> None:
 
 def run_experiment(args: argparse.Namespace) -> dict[str, Any]:
     """Execute the complete classifier OOF and graph evaluation workflow."""
-    import torch
-
     from modern_symptom_classifier import ClassifierConfig
 
     output_dir = Path(args.output_dir)
